@@ -192,3 +192,157 @@ raw öre numbers on a line chart.
 
 See CLAUDE.md's "Dashboard scope" and "Sprints" sections for the
 updated, authoritative spec.
+
+## Sprint 1 — Data pipeline (2026-10-03)
+
+### Goal
+Add caching and fallback to the price and weather modules so the
+pipeline is resilient to API outages and works for any date range in
+any area, per CLAUDE.md's Sprint 1 scope. Close out the four open
+questions Sprint 0 left for this sprint. No new widgets (Sprint 2).
+
+### Built
+- `src/cache.py` (new): shared day-granularity CSV cache —
+  `data/cache/prices/{AREA}/{date}.csv`, `data/cache/weather/{station}/{date}.csv`.
+  Stored in UTC (sidesteps the DST-transition mixed-offset problem
+  `_parse_day` already solves for the live API). Read/write are
+  best-effort: a missing or corrupt file degrades to "no fallback", a
+  write failure is swallowed rather than breaking a successful fetch.
+- `src/prices.py`: `fetch_prices` now returns a `PriceFetchResult(df,
+  failed_days, fallback_days)` NamedTuple. The per-day fetch loop runs
+  through a small `ThreadPoolExecutor` (network I/O only; bookkeeping
+  stays sequential afterwards). A successful day writes through to
+  cache; a transient failure (not a confirmed 404) falls back to the
+  cached snapshot if one exists.
+- `src/weather.py`: `fetch_temperature` now returns a
+  `WeatherFetchResult` with the same shape. Replaces Sprint 0's
+  always-`"latest-months"` placeholder and uncaught-`raise_for_status()`
+  behavior with real period selection (`_pick_periods`, a deliberately
+  overlapping two-band heuristic — see Decisions), a JSON-or-CSV fetch
+  path per period (see Problems hit), merging across periods with
+  archive winning ties on overlapping timestamps, and the same
+  cache-fallback treatment as prices.
+- `app.py`: unpacks the 3-tuples, shows `st.info` for days served from
+  cache and `st.warning` for days with no fallback available, and wraps
+  the weather fetch in `try/except` → `st.error` so a weather failure
+  degrades gracefully instead of crashing the page.
+- `tests/test_cache.py` (new), plus additions to `tests/test_prices.py`
+  and `tests/test_weather.py`: cache round trips (including a
+  DST-transition day), the 404-vs-failed-vs-fallback three-way split,
+  the `_pick_periods` boundary cases, a benign-gap-vs-real-failure
+  distinction for weather, and a regression test for the CSV-parsing
+  bug below. 29 tests total, all passing.
+- Real demo cache data committed: `data/cache/prices/SE3/2026-08-*.csv`
+  and `data/cache/weather/71420/2026-08-*.csv` (31 days each) — the
+  exact range `app.py` demos, so the fallback path is actually
+  exercisable, not just theoretically implemented.
+
+### Decisions (and why)
+1. **Cache stores the already-resampled hourly DataFrame, not raw
+   records** — resolves Sprint 0's open question. The resampling logic
+   is already correct and tested; re-deriving it from raw data on every
+   cache load would be redundant work for no benefit, since the cache
+   is a fallback, not a source of truth.
+2. **`_pick_periods` uses two deliberately overlapping age bands
+   (try `corrected-archive` once a date is ≥60 days old, try
+   `latest-months` up to ≤150 days old) instead of one exclusive
+   threshold.** Verified live against station 71420: `corrected-archive`
+   covers ages ≥~94 days, `latest-months` covers ages ≤~130 days —
+   confirmed overlap, no gap. A single cutoff risks landing on the
+   wrong side of that boundary as it drifts forward over the project's
+   timeline; two HTTP calls total (never per-day) makes trying both
+   periods in the overlap band cheap insurance rather than waste.
+3. **A small thread pool (`max_workers=4`) for the price day-fetch
+   loop**, fulfilling CLAUDE.md's "fetch day files politely: small
+   thread pool, timeouts, retries" rule, which Sprint 0 only partly
+   satisfied. Only the network I/O (`_fetch_day`) runs concurrently;
+   cache reads/writes and result bucketing stay sequential in the main
+   thread afterward, so there's no shared-mutable-state race to reason
+   about. Weather does **not** get a pool — it's at most 1-2 HTTP
+   requests total regardless of range length, so there's nothing to
+   parallelize.
+4. **`PriceFetchResult`/`WeatherFetchResult` as `NamedTuple`s**, not
+   plain tuples, now that arity has grown to 3. Still unpacks
+   positionally (`df, failed, fallback = fetch_prices(...)` keeps
+   working), but call sites and tests can also use `.fallback_days` and
+   avoid a silent positional mix-up.
+5. **Cache stored in UTC, converted to Europe/Stockholm on read** —
+   verified live that `pd.read_csv(..., parse_dates=True)` round-trips a
+   single-offset tz-aware index cleanly in this pandas version (3.0.6),
+   with no manual `tz_localize` needed. Storing in local time instead
+   would put two different UTC offsets in the same file on the two real
+   DST-transition dates, the exact ambiguity `_parse_day` already avoids
+   for the live API.
+6. **CSV over parquet for the cache format** — avoids adding
+   `pyarrow`/`fastparquet` as a new dependency (CLAUDE.md requires
+   asking first) and stays diffable in git, which matters for a course
+   project graded partly on process.
+
+### Alternatives considered and rejected (and why)
+- A single age threshold for period selection (e.g. "age > 60 →
+  archive") — rejected during implementation review: it silently routes
+  dates in the ~60-94-day range to `corrected-archive` alone, which
+  doesn't have them yet, producing a successful-but-empty response that
+  looks identical to "no data here." The two-band heuristic (Decision 2)
+  fixes this by trying both periods whenever a date could plausibly be
+  in either.
+- A cache-fallback attempt on every absent day, including confirmed
+  404s / benign gaps in an otherwise-successful payload — rejected;
+  there's nothing to "fall back to" when the API has already answered
+  "no data here," so fallback is only attempted for days whose fetch
+  genuinely failed.
+- Threading the weather fetch loop like prices — rejected; weather
+  fetches whole periods, not day-by-day, so there's only ever 1-2
+  requests to make regardless of range length.
+
+### Problems hit / how solved
+- **Real bug found during manual pipeline verification, not covered by
+  the original plan**: `corrected-archive`'s metadata only ever offers a
+  `text/plain` (CSV) data link, never `application/json` — unlike
+  `latest-months` and the other rolling periods, which offer both. The
+  original `_fetch_period` only looked for a JSON link, so every
+  `corrected-archive`-only date silently landed in `failed_days` (a
+  `StopIteration` on the missing JSON link, caught and reported as a
+  generic failure) even though the data was genuinely available. Caught
+  by manually exercising a January 2026 date range end-to-end (not by
+  the unit tests, which hadn't been written against the real payload
+  shape yet) — a good reminder that pure-function tests built from
+  assumed fixtures don't substitute for hitting the real API at least
+  once per code path. Fixed: `_fetch_period` now tries the JSON link
+  first and falls back to a dedicated CSV parser (`_parse_archive_csv`)
+  when only `text/plain` is offered, so the fix isn't hardcoded to
+  "archive is special" — it degrades the same way for any period that
+  turns out to be CSV-only.
+- The archive CSV itself has real format quirks once found: a
+  variable-length Swedish-language preamble (station info, parameter
+  info, a position-history table whose row count depends on how many
+  times the station has physically moved) before the actual data table;
+  a UTF-8 BOM; times given directly in UTC text rather than epoch-ms;
+  and ragged row widths (the first few data rows carry extra trailing
+  metadata columns that later rows don't have). Solved by locating the
+  real header row (`"Datum;..."`) by content rather than a fixed line
+  offset, and reading with `usecols` pinned to the first four columns
+  regardless of how many trailing columns a given row has. Added a
+  regression test (`test_parse_archive_csv_handles_real_format`) using a
+  trimmed real sample, plus a test on `_fetch_period` itself confirming
+  the JSON-absent-so-fall-back-to-CSV branch.
+- A stale `streamlit run` process from an earlier, unrelated session was
+  still bound to port 8501 and serving the old Sprint-0-era cached
+  result shape, producing a confusing `ValueError: not enough values to
+  unpack` that had nothing to do with the new code. Solved by killing
+  it and restarting clean — not a pipeline bug, but worth noting since
+  it looked like one at first.
+
+### Open questions for next sprint
+- Sprint 0's four open questions are now resolved (raw-vs-resampled
+  cache storage, weather error handling, missing/failed-day UI
+  treatment, and the archive/latest-months overlap) — see Decisions
+  above.
+- The corrected-archive CSV is the station's entire history (65 years,
+  ~334k rows) downloaded in full on every call that needs it, even for
+  a 3-day request — fine for a course project's traffic, but worth
+  knowing if performance ever becomes a concern.
+- `_pick_periods`' 60/150-day bands are a time-boxed heuristic against
+  today's measured boundary (ages ~94/~130); if this project is still
+  being actively developed many months from now, worth re-verifying the
+  live boundary hasn't drifted outside that margin.

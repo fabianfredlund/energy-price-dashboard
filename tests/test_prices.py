@@ -9,12 +9,13 @@ the real API itself uses, confirmed by fetching 2025-10-26 and 2026-03-29
 live: a repeated local hour on fall-back, a skipped one on spring-forward.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
 
-from src.prices import _fetch_day, _parse_day
+from src.cache import read_day_cache, write_day_cache
+from src.prices import PRICE_COLUMNS, _fetch_day, _parse_day, fetch_prices
 
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
 
@@ -150,3 +151,73 @@ def test_fetch_day_returns_failed_after_exhausting_retries_on_5xx(monkeypatch):
     assert records is None
     assert failed is True
     assert len(calls) == 3
+
+
+def test_fetch_prices_transient_failure_falls_back_to_cache(monkeypatch, cache_root):
+    day = date(2026, 1, 15)
+    cached_df = _parse_day(_hourly_records(datetime(2026, 1, 14, 23, 0, tzinfo=timezone.utc), 24))
+    write_day_cache(cache_root, "prices", "SE3", day, cached_df)
+
+    monkeypatch.setattr(requests, "get", lambda url, timeout: _FakeResponse(503))
+    monkeypatch.setattr("src.prices.time.sleep", lambda seconds: None)
+
+    result = fetch_prices(day, day, "SE3", cache_root=cache_root)
+
+    assert result.fallback_days == [day]
+    assert result.failed_days == []
+    assert len(result.df) == 24
+
+
+def test_fetch_prices_confirmed_404_does_not_read_cache(monkeypatch, cache_root):
+    day = date(2026, 1, 16)
+    cached_df = _parse_day(_hourly_records(datetime(2026, 1, 15, 23, 0, tzinfo=timezone.utc), 24))
+    write_day_cache(cache_root, "prices", "SE3", day, cached_df)
+
+    monkeypatch.setattr(requests, "get", lambda url, timeout: _FakeResponse(404))
+
+    result = fetch_prices(day, day, "SE3", cache_root=cache_root)
+
+    assert result.failed_days == []
+    assert result.fallback_days == []
+    assert len(result.df) == 0  # confirmed-no-data day is absent; cache not consulted
+
+
+def test_fetch_prices_successful_fetch_writes_through_cache(monkeypatch, cache_root):
+    day = date(2026, 1, 17)
+    records = _hourly_records(datetime(2026, 1, 16, 23, 0, tzinfo=timezone.utc), 24)
+
+    monkeypatch.setattr(requests, "get", lambda url, timeout: _FakeResponse(200, records))
+
+    result = fetch_prices(day, day, "SE3", cache_root=cache_root)
+
+    assert len(result.df) == 24
+    cached = read_day_cache(cache_root, "prices", "SE3", day, PRICE_COLUMNS)
+    assert cached is not None
+    assert len(cached) == 24
+
+
+def test_fetch_prices_single_day_range(monkeypatch, cache_root):
+    day = date(2026, 1, 18)
+    records = _hourly_records(datetime(2026, 1, 17, 23, 0, tzinfo=timezone.utc), 24)
+
+    monkeypatch.setattr(requests, "get", lambda url, timeout: _FakeResponse(200, records))
+
+    result = fetch_prices(day, day, "SE3", cache_root=cache_root)
+
+    assert len(result.df) == 24
+    assert result.failed_days == []
+    assert result.fallback_days == []
+
+
+def test_fetch_prices_empty_reversed_range_returns_no_error(monkeypatch, cache_root):
+    def fake_get(url, timeout):
+        raise AssertionError("should not be called for an empty date range")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    result = fetch_prices(date(2026, 1, 20), date(2026, 1, 10), "SE3", cache_root=cache_root)
+
+    assert len(result.df) == 0
+    assert result.failed_days == []
+    assert result.fallback_days == []
+    assert list(result.df.columns) == PRICE_COLUMNS

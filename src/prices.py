@@ -24,21 +24,50 @@ Sprint 0, for the full story):
 - Units: returned as SEK_per_kWh / EUR_per_kWh / EXR, exactly as the API
   gives them. Conversion to öre/kWh for display is left to the caller
   (app.py) -- this module stays a plain unit-preserving fetch+parse layer.
+
+Sprint 1 additions (see SPRINTLOG.md): each day's fetch loop runs through
+a small thread pool (network I/O only -- the day-fetch calls -- bookkeeping
+stays sequential afterwards, so there's no shared-mutable-state race to
+reason about), per CLAUDE.md's "fetch day files politely: small thread
+pool, timeouts, retries" rule. A successful fetch is written through to
+src/cache.py's day-granularity CSV cache; a transient failure (not a
+confirmed 404) falls back to that cache if a snapshot exists.
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+from pathlib import Path
+from typing import NamedTuple
 
 import pandas as pd
 import requests
+
+from src.cache import DEFAULT_CACHE_ROOT, read_day_cache, write_day_cache
 
 BASE_URL = "https://www.elprisetjustnu.se/api/v1/prices"
 VALID_AREAS = {"SE1", "SE2", "SE3", "SE4"}
 REQUEST_TIMEOUT = 10
 MAX_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 1.5
+MAX_WORKERS = 4
 
 PRICE_COLUMNS = ["SEK_per_kWh", "EUR_per_kWh", "EXR"]
+
+
+class PriceFetchResult(NamedTuple):
+    df: pd.DataFrame
+    failed_days: list[date]
+    fallback_days: list[date]
+
+
+def _date_range(start_date: date, end_date: date) -> list[date]:
+    days = []
+    day = start_date
+    while day <= end_date:
+        days.append(day)
+        day += timedelta(days=1)
+    return days
 
 
 def _day_url(day: date, area: str) -> str:
@@ -94,35 +123,50 @@ def _parse_day(records: list) -> pd.DataFrame:
 
 
 def fetch_prices(
-    start_date: date, end_date: date, area: str = "SE3"
-) -> tuple[pd.DataFrame, list[date]]:
+    start_date: date,
+    end_date: date,
+    area: str = "SE3",
+    cache_root: Path = DEFAULT_CACHE_ROOT,
+) -> PriceFetchResult:
     """Fetch SE-area spot prices for [start_date, end_date] inclusive.
 
-    Returns (df, failed_days):
+    Returns a PriceFetchResult(df, failed_days, fallback_days):
     - df: hourly DataFrame indexed by tz-aware Europe/Stockholm timestamps,
       columns SEK_per_kWh / EUR_per_kWh / EXR. Days confirmed to have no
       published data (404) are simply absent -- compare len(df) against
       expected row counts to detect these gaps.
-    - failed_days: days that could not be fetched after retries (as
-      opposed to days confirmed to have no data). Never silently merged
-      into the "no data" case -- the caller should surface these.
+    - failed_days: days that could not be fetched live AND had no cached
+      snapshot to fall back to. Never silently merged into the "no data"
+      case -- the caller should surface these.
+    - fallback_days: days that could not be fetched live but were served
+      from the offline cache instead -- degraded, but recovered.
     """
     if area not in VALID_AREAS:
         raise ValueError(f"area must be one of {VALID_AREAS}, got {area!r}")
 
+    days = _date_range(start_date, end_date)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        fetch_results = list(pool.map(lambda d: _fetch_day(d, area), days))
+
     frames = []
     failed_days = []
-    day = start_date
-    while day <= end_date:
-        records, failed = _fetch_day(day, area)
+    fallback_days = []
+    for day, (records, failed) in zip(days, fetch_results):
         if records:
-            frames.append(_parse_day(records))
+            day_df = _parse_day(records)
+            frames.append(day_df)
+            write_day_cache(cache_root, "prices", area, day, day_df)
         elif failed:
-            failed_days.append(day)
-        day += timedelta(days=1)
+            cached = read_day_cache(cache_root, "prices", area, day, PRICE_COLUMNS)
+            if cached is not None:
+                frames.append(cached)
+                fallback_days.append(day)
+            else:
+                failed_days.append(day)
+        # else: confirmed 404 -- day is absent, no fallback attempted
 
     if not frames:
         df = pd.DataFrame(columns=PRICE_COLUMNS)
     else:
         df = pd.concat(frames).sort_index()
-    return df, failed_days
+    return PriceFetchResult(df, failed_days, fallback_days)
