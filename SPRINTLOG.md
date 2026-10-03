@@ -346,3 +346,139 @@ questions Sprint 0 left for this sprint. No new widgets (Sprint 2).
   today's measured boundary (ages ~94/~130); if this project is still
   being actively developed many months from now, worth re-verifying the
   live boundary hasn't drifted outside that margin.
+
+## Sprint 2 — Interactions (2026-10-03)
+
+### Goal
+Turn the Sprint 1 pipeline into the first real interactive dashboard: the
+three required interactions (date range, price area + compare, temperature
+overlay), the History/Plan ahead `st.tabs` structure, and colour-coded
+prices with a plain-language legend. KPI cards, the heatmap, and the
+production planner stay out of scope (Sprint 3).
+
+### Built
+- `src/transform.py`: `categorize_by_price(df, price_col)` — adds a
+  Cheap/Normal/Expensive/Spike column from the DataFrame's own quantiles
+  (relative, not a fixed öre cutoff), and `resample_daily_mean(df,
+  columns)` — hourly-to-daily aggregation for the long-range History
+  view, DST-safe and gap-aware. 13 new tests.
+- `app.py` rebuilt: shared controls (price area, compare toggle,
+  temperature toggle) above `st.tabs(["History", "Plan ahead"])`. History
+  gets a date-range picker defaulting to the committed Sprint 1 demo
+  window; Plan ahead is fixed to today+tomorrow with a "Now" marker.
+  Both tabs loop over `[area] + [compare_area]` when comparing, each
+  area rendered as its own full chart block. öre/kWh conversion and the
+  Elpriset attribution footer (required since Sprint 0, never wired up
+  until now) both landed here.
+- Chart helper (`_build_price_figure`): price as colour-coded
+  `go.Bar` (one trace per category, so each colour becomes its own
+  Plotly legend entry for free), temperature as a `go.Scatter` line in a
+  **second stacked panel sharing the x-axis** — not a secondary y-axis
+  (see Decisions). `add_vline` marks the current hour on Plan ahead.
+
+### Decisions (and why)
+1. **Stacked subplots, not dual-axis, for the temperature overlay.** The
+   approved plan originally used `make_subplots(secondary_y=True)`. Before
+   writing the chart code I loaded this project's `dataviz` skill (as its
+   own trigger conditions require before any chart code) and it treats
+   dual-axis — two independent y-scales on one plot — as a hard
+   non-negotiable ("the #1 chart mistake"), stronger than how the
+   approved plan had characterized it. Flagged to Fabian mid-implementation
+   and confirmed: price bars on top, temperature line in a second panel
+   below sharing one time axis. Keeps temperature visually locked to the
+   price chart's timeline (the closest honest match to CLAUDE.md's
+   "overlay toggle on the price chart") without implying a false
+   correlation between two arbitrarily-aligned scales.
+2. **Colour palette reuses the dataviz skill's fixed status palette**
+   (good `#0ca30c` → Cheap, serious `#ec835a` → Expensive, critical
+   `#d03b3b` → Spike) **plus the skill's own "Muted" grey `#898781` for
+   Normal**, per CLAUDE.md's explicit "middle third → neutral grey"
+   instruction (not a status colour — there's no neutral status role in
+   the skill's four-step good/warning/serious/critical scale). The
+   skill's generic categorical-palette validator FAILs this exact
+   combination (it assumes every slot is a distinct saturated hue, not
+   one deliberate neutral) — ran it directly, understood why it's the
+   wrong tool for a status-like severity scale with a neutral injected
+   by a hard product requirement, and used the skill's own
+   separately-documented, separately-validated status-palette contrast
+   numbers instead. Mitigated the one real floor-band CVD pair
+   (Expensive↔Normal, ΔE 7.9) with the secondary encoding the skill
+   requires for that band: Plotly's always-visible legend, the mandatory
+   plain-language caption, and per-bar hover text all state the category
+   in words, so colour is never the only signal.
+3. **Compare-two-areas renders as two independent, stacked, fully
+   colour-coded chart blocks** (one function reused per area) rather
+   than one combined chart — keeps each area's colouring meaningful
+   against its own distribution, exactly as CLAUDE.md specifies ("where
+   its price sits within the period currently shown"), and avoids
+   inventing a shared/blended colour scale CLAUDE.md never asked for.
+   Applies identically in both tabs (see Problems hit).
+4. **Plan ahead's "not published yet" message reuses Sprint 1's existing
+   404-vs-failed distinction with zero changes to `src/prices.py`**:
+   tomorrow absent from the result + not in `failed_days` → confirmed-404,
+   the expected pre-~13:00 case, friendly `st.info`; tomorrow absent +
+   in `failed_days` → a real fetch problem, `st.warning`.
+5. **Shorter cache TTL for Plan ahead (600s) than History (3600s)** so
+   the "tomorrow just got published" transition around 13:00 shows up
+   within a session instead of needing a hard refresh.
+6. **öre/kWh conversion happens once, immediately after each fetch, in
+   `app.py`** — one derived column feeds categorization, the chart axis,
+   and the hover tooltip, so there's exactly one place a unit bug could
+   hide. `src/prices.py` stays an unchanged plain SEK/kWh pass-through.
+
+### Alternatives considered and rejected (and why)
+- Keeping the originally-planned dual-axis chart with mitigations
+  (distinct labelled axes, a caption noting independence) — rejected
+  once the `dataviz` skill's actual non-negotiable language was read in
+  full; the plan's own framing ("a known anti-pattern, worth keeping
+  anyway") undersold how hard a line the skill draws. Two stacked panels
+  achieve the same product requirement without the anti-pattern.
+- A single combined comparison chart (e.g. two line traces, one per
+  area, dropping the colour scheme for that view) — rejected in favour
+  of decision 3; CLAUDE.md's colour-coding requirement doesn't carve out
+  an exception for comparison, and two colour-coded charts are simpler
+  to reason about than inventing a cross-area shared palette.
+- A single Expensive/Spike/Cheap-only palette with no neutral — rejected;
+  CLAUDE.md explicitly names "neutral grey" for the middle third, not a
+  fourth hue.
+
+### Problems hit / how solved
+- Mid-implementation design change: see Decision 1 — the dual-axis
+  design in the approved plan turned out to directly contradict the
+  `dataviz` skill's own non-negotiable rules once actually loaded before
+  writing chart code (the plan was written before that skill load).
+  Flagged and resolved with Fabian before writing the chart function,
+  rather than silently shipping either the anti-pattern or an unreviewed
+  design change.
+- Caught during manual QA, not the automated tests: the "Compare with
+  another area" control sits above `st.tabs` as a shared control, but
+  the first implementation only wired it into the History tab — Plan
+  ahead silently ignored it despite the control visibly showing "Compare
+  against: SE1" with the checkbox ticked. Confusing, inconsistent UX for
+  a control presented as shared. Fixed by looping Plan ahead over the
+  same `[area] + [compare_area]` list History already used (Decision 3's
+  helper function made this a small change, not a rewrite).
+- A test-fixture bug, not a production bug: the new `resample_daily_mean`
+  tests initially used literal UTC midnight as a "day start," which is
+  actually 01:00 Stockholm local in winter (CET, +01:00) — the exact
+  offset pitfall `test_prices.py`'s fixtures already account for, that I
+  didn't carry over when writing the new fixture. Two tests failed with
+  3-4 rows instead of 2 until the fixture was corrected to start at
+  Stockholm local midnight; `resample_daily_mean` itself was correct the
+  whole time.
+
+### Open questions for next sprint
+- Sprint 3's heatmap should reuse `categorize_by_price` for its own
+  colour scheme per CLAUDE.md ("recoloured to the Sprint 2 scheme") —
+  confirm the same relative-quantile logic reads sensibly at hour×weekday
+  granularity, where each cell represents a mean over many underlying
+  hours rather than a single observation.
+- The production planner's "typical" History-mode pricing (average price
+  per hour-of-day across the selected period) is a different aggregation
+  from anything built this sprint (`resample_daily_mean` collapses to one
+  row per day, not one row per hour-of-day across many days) — will need
+  its own small transform function in Sprint 3.
+- Compare mode currently stacks full chart blocks vertically for each
+  area; worth a quick gut-check once KPI cards land in Sprint 3 whether
+  that remains the clearest layout or whether side-by-side columns read
+  better once there's more content per area.
