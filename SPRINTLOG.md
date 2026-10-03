@@ -140,3 +140,55 @@ building the real fetch/cache/transform layers in Sprint 1+.
 - Verify SMHI's `corrected-archive` and `latest-months` periods overlap
   with no gap, so Sprint 1+ can stitch them together across an arbitrary
   date range without a hole at the boundary.
+
+## Scope update — 2026-10-03
+
+### What changed
+Added, ahead of Sprint 2/3 implementation (not built yet — this is a
+planning/scope entry):
+
+1. **Two modes** (`st.tabs`): "History" (the existing
+   date-range/area/temperature/KPI/heatmap analysis) and "Plan ahead"
+   (today + tomorrow's hourly prices, current-hour marker, graceful "not
+   published yet" message before elprisetjustnu.se's ~13:00 publish time
+   for tomorrow — not forecasting).
+2. **Colour-coded prices**: every hour classified by relative tercile +
+   top-10%-spike within the displayed period (green/neutral/orange/red),
+   applied to both modes, with a plain-language legend. Plan ahead uses
+   hourly bars; History uses hourly bars up to 31 days and switches to
+   daily bars beyond that (see CLAUDE.md "Colour-coded prices" for the
+   reasoning).
+3. **Production planner**: a multi-unit planner (`st.data_editor` table
+   of named units) with per-unit cheapest-start recommendations, totals,
+   combined peak power, and mode-aware price source (actual prices in
+   Plan ahead, "typical" hour-of-day averages in History).
+
+### Why
+Came out of the Ideate/Prototype step of the design-thinking process —
+built a visual mockup in Lovable to pressure-test the UX with the
+client's planner/CFO persona before committing Streamlit sprint time to
+it. The two-mode split answers a question the single-view design didn't:
+"what do I do right now" (Plan ahead) vs. "what's the usual pattern"
+(History) — closer to how a production planner would actually use this
+day to day. The colour coding and multi-unit planner came out of the
+same exercise: a planner juggles several machines, not one, and a
+cheap/normal/expensive/spike read is faster to act on at a glance than
+raw öre numbers on a line chart.
+
+### What it replaces
+- The single load-shift calculator originally scoped (kWh/hours/start-time
+  in, one cost comparison out) is replaced by the production planner
+  (multiple named units, same underlying cheapest-window logic, now
+  per-unit and totalled).
+- The plain (uncoloured) price-over-time chart and heatmap from the
+  original Sprint 3 scope gain the colour-coding scheme above; the views
+  themselves aren't replaced, just recoloured and — for History on long
+  ranges — re-aggregated to daily bars.
+
+### Sprint placement
+- Sprint 2: modes (`st.tabs`) + colour coding.
+- Sprint 3: production planner (replaces the calculator item in that
+  sprint).
+
+See CLAUDE.md's "Dashboard scope" and "Sprints" sections for the
+updated, authoritative spec.
