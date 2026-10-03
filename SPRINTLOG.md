@@ -620,3 +620,98 @@ savings estimate for at least two production units.
   is still the desired behaviour once the app is actually deployed and
   used by someone other than the builder, versus starting from an empty
   table.
+
+## Sprint 4 — Test and ship (2026-10-03)
+
+### Goal
+pytest suite, edge cases, fixes from user tests, README, deploy to
+Streamlit Community Cloud. Done when: the public link works in a clean
+browser. No specific bugs were reported from Fabian's own testing at the
+start of this sprint, so "fixes from user tests" became a general
+hardening/edge-case review pass rather than a list of reported issues.
+
+### Built
+- `requirements.txt`: pinned to the exact versions tested against all
+  five sprints (`streamlit==1.64.0`, `pandas==3.0.6`, `plotly==7.1.0`,
+  `requests==2.34.2`, `pytest==9.1.1`), replacing the loose `>=` pins
+  Sprint 0 deliberately deferred — its own committed plan doc said this
+  explicitly: "tighten to exact versions at Sprint 4." Verified by
+  installing into a completely fresh venv and re-running the full test
+  suite there (80 passed), not just trusting `pip freeze` on the
+  already-working dev environment.
+- `README.md`: full rewrite — project overview, a usage guide per view
+  mapped to the five problem-statement questions, run-locally and
+  `pytest` instructions (kept, already correct), data sources and the
+  required Elpriset attribution, a step-by-step Streamlit Community
+  Cloud deploy section, and a "known limitations" section pointing at
+  things already documented as deliberate scope boundaries elsewhere
+  (SPRINTLOG, the Production planner's own caveats).
+- A live, Playwright-driven edge-case walkthrough of the actual running
+  app (not just `src/`'s unit tests, which can't prove the UI wires
+  things correctly): single-day History range, a 63-day range crossing
+  the SMHI `corrected-archive`/`latest-months` boundary with the
+  temperature overlay on, compare mode + temperature + the long range
+  together, switching all production units inactive, and adding a blank
+  (unnamed) unit row. All six rendered correctly with zero console
+  errors and no code changes were needed — the incremental per-sprint
+  hardening already covered this ground.
+
+### Decisions (and why)
+1. **No new `app.py` changes or regression tests this sprint.** The
+   edge-case walkthrough was designed to find problems, not to justify
+   busywork — every scenario tested held up, so nothing was changed.
+   Sprint 4's own plan said explicitly: add a regression test only for a
+   *real* bug found, don't pre-add speculative coverage for inputs the
+   UI already structurally prevents (e.g. negative hours, blocked by
+   `NumberColumn(min_value=1)`).
+2. **GitHub push and the Streamlit Community Cloud connection are
+   handed off, not scripted.** No git remote existed and the `gh` CLI
+   isn't installed on this machine; Fabian will create the GitHub repo
+   himself and share the URL for the push, and the actual Cloud deploy
+   step needs his own account login, which isn't something this session
+   can do. The README's Deploy section documents the exact steps either
+   way.
+3. **`-0.0 öre/kWh`** showed up as a KPI value during the edge-case
+   walkthrough (cheapest hour on a 63-day SE3 range) and, separately,
+   **`-5.7 öre/kWh`** for SE1 on the same range — both are genuine,
+   correctly-computed small negative spot prices (a real phenomenon in
+   Nordic markets during oversupply), not a formatting bug or a sign
+   error; `-0.0` is just `:.1f` rounding a tiny negative number. Left
+   as-is rather than "fixed," since hiding the sign would misrepresent
+   a real (if small) negative price as exactly zero.
+
+### Alternatives considered and rejected (and why)
+- Writing new speculative unit tests for every theoretical edge case
+  (negative inputs, duplicate unit names, etc.) regardless of whether
+  the UI can actually produce them — rejected; CLAUDE.md's own edge-case
+  list is specific (empty selection, missing days, single-day range,
+  API timeout), and every one of those is already covered either by
+  existing `src/` tests or this sprint's live walkthrough.
+- Attempting to force the "only a start date picked, end date still
+  empty" state through Playwright by clearing the native
+  `<input type="date">` element directly — abandoned after it fought
+  browser-level native-input semantics (the browser reverts an emptied
+  date input to its last committed value rather than firing the change
+  Streamlit listens for) without revealing anything about app
+  correctness; the guard (`len(date_range) != 2`) is simple, matches
+  Streamlit's documented `date_input` contract, and has held up through
+  three prior sprints of manual and live-browser testing.
+
+### Problems hit / how solved
+- The live-verification Playwright session accumulated real "Running..."
+  spinner timing issues (a screenshot taken mid-rerun showed only one of
+  two compared areas) — not a bug, just an under-length wait in the test
+  script. Solved by polling for the "Running" indicator to disappear
+  instead of a fixed timeout, then re-verifying cleanly.
+- Streamlit's data-editor grid renders via canvas (Glide Data Grid), so
+  individual cells have no DOM elements to target directly — worked out
+  pixel-coordinate clicking against the grid's bounding box (toggling
+  checkboxes, adding a blank row) instead, which is more brittle than
+  normal DOM automation but was enough to verify both scenarios live.
+
+### Open questions for next sprint
+None — this was the last sprint in CLAUDE.md's plan. Remaining steps are
+operational, not engineering: Fabian creates the GitHub repo and shares
+the URL for the push; he then connects Streamlit Community Cloud himself
+per the README's Deploy section and shares the resulting public URL for
+a final clean-browser check.
