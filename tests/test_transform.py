@@ -7,7 +7,13 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from src.transform import categorize_by_price, resample_daily_mean
+from src.transform import (
+    categorize_by_price,
+    hourly_weekday_means,
+    price_kpis,
+    resample_daily_mean,
+    typical_hour_of_day,
+)
 
 
 def _hourly_price_df(utc_start: datetime, prices: list[float]) -> pd.DataFrame:
@@ -135,3 +141,71 @@ def test_resample_daily_mean_requires_explicit_columns_for_non_numeric_frame():
     result = resample_daily_mean(df, columns=["temperature_c"])  # must not raise
     assert len(result) == 1
     assert list(result.columns) == ["temperature_c"]
+
+
+# -- price_kpis ------------------------------------------------------
+
+def test_price_kpis_empty_returns_none():
+    df = pd.DataFrame({"ore_per_kWh": []})
+    assert price_kpis(df, "ore_per_kWh") is None
+
+
+def test_price_kpis_single_row():
+    df = _hourly_price_df(datetime(2026, 1, 14, 23, 0, tzinfo=timezone.utc), [42.0])
+    kpis = price_kpis(df, "ore_per_kWh")
+    assert kpis.avg_price == 42.0
+    assert kpis.cheapest_price == 42.0
+    assert kpis.priciest_price == 42.0
+    assert kpis.daily_spread == 0.0
+
+
+def test_price_kpis_multi_day_known_values():
+    # Stockholm midnight on 2026-01-14 (winter, +01:00) == 2026-01-13 23:00 UTC
+    day1 = [10.0] * 24  # flat day: max - min = 0
+    day2 = [5.0] + [15.0] * 22 + [25.0]  # max=25, min=5 -> spread 20
+    prices = day1 + day2
+    df = _hourly_price_df(datetime(2026, 1, 13, 23, 0, tzinfo=timezone.utc), prices)
+    kpis = price_kpis(df, "ore_per_kWh")
+    assert kpis.avg_price == sum(prices) / len(prices)
+    assert kpis.cheapest_price == 5.0
+    assert kpis.priciest_price == 25.0
+    assert kpis.daily_spread == 10.0  # mean of [0, 20]
+
+
+# -- hourly_weekday_means ------------------------------------------------------
+
+def test_hourly_weekday_means_empty_returns_empty_with_columns():
+    df = pd.DataFrame({"ore_per_kWh": []})
+    result = hourly_weekday_means(df, "ore_per_kWh")
+    assert list(result.columns) == ["weekday", "hour", "ore_per_kWh"]
+    assert len(result) == 0
+
+
+def test_hourly_weekday_means_column_names_and_feeds_categorize_by_price():
+    df = _hourly_price_df(
+        datetime(2026, 1, 13, 23, 0, tzinfo=timezone.utc), [10.0] * 24 + [20.0] * 24
+    )
+    result = hourly_weekday_means(df, "ore_per_kWh")
+    assert list(result.columns) == ["weekday", "hour", "ore_per_kWh"]
+    assert len(result) == 48  # two distinct weekdays x 24 distinct hours, no overlap
+
+    categorized = categorize_by_price(result, "ore_per_kWh")  # must not raise
+    assert "category" in categorized.columns
+
+
+# -- typical_hour_of_day ------------------------------------------------------
+
+def test_typical_hour_of_day_empty_returns_empty_series():
+    df = pd.DataFrame({"ore_per_kWh": []})
+    result = typical_hour_of_day(df, "ore_per_kWh")
+    assert len(result) == 0
+
+
+def test_typical_hour_of_day_multi_day_known_means():
+    day1 = [10.0] * 24
+    day2 = [30.0] * 24
+    df = _hourly_price_df(datetime(2026, 1, 13, 23, 0, tzinfo=timezone.utc), day1 + day2)
+    result = typical_hour_of_day(df, "ore_per_kWh")
+    assert len(result) == 24
+    assert list(result.index) == list(range(24))
+    assert (result == 20.0).all()  # each hour-of-day: mean(10, 30) == 20

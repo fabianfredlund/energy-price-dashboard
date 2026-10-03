@@ -482,3 +482,141 @@ production planner stay out of scope (Sprint 3).
   area; worth a quick gut-check once KPI cards land in Sprint 3 whether
   that remains the clearest layout or whether side-by-side columns read
   better once there's more content per area.
+
+## Sprint 3 — Insight layer (2026-10-03)
+
+### Goal
+KPI cards, the hour × weekday heatmap (recoloured to Sprint 2's scheme),
+and the production planner — the last feature sprint before Sprint 4
+(test and ship). Done when a non-expert can answer the five problem-
+statement questions from the app and get a start-time recommendation +
+savings estimate for at least two production units.
+
+### Built
+- `src/transform.py`: `price_kpis` (average, cheapest/priciest hour,
+  daily spread — always computed from the true hourly frame, never the
+  >31-day display aggregation), `hourly_weekday_means` (long-form mean
+  price per weekday×hour, feeds `categorize_by_price` unmodified),
+  `typical_hour_of_day` (24-value hour-of-day profile, the planner's
+  History-mode price source). 7 new tests.
+- `src/calc.py` (was an empty stub): the whole production planner —
+  `cheapest_window`/`window_cost` (prefix-sum contiguous-window search,
+  optional wraparound for History's cyclical typical-day profile),
+  `energy_kwh`, `combined_peak_power` (fixed-length accumulator array),
+  `plan_unit` (bundles one unit's recommendation + usual-start
+  comparison), `planner_totals`, `yearly_saving_estimate`. All pure,
+  positions are plain integers — `app.py` owns converting real
+  timestamps/HH:MM to and from them. 31 new tests, covering every edge
+  case CLAUDE.md names explicitly (no active units, 0 kW/0 hours, run
+  length longer than available priced hours).
+- `app.py`: a shared `st.data_editor` production-units table above
+  `st.tabs` (seeded with two example units), KPI cards + the heatmap in
+  History only (per area, reusing the existing per-area loop), and the
+  production planner rendered in both tabs via one shared
+  `_render_planner` helper with a mode-appropriate price source.
+
+### Decisions (and why)
+1. **Three real gaps found between CLAUDE.md's Production planner
+   subsection and the rest of the spec, each resolved and documented
+   rather than silently picked one way:**
+   - *"Per year" savings*: the problem statement's Q3 ("per run and per
+     year") is still covered by this sprint's done-when bar, but the
+     Production planner subsection's totals list never mentions a yearly
+     figure. Added `yearly_saving_estimate` from an explicit, stated
+     assumption (1 run/day × 365 days/year) shown with a caveat — no new
+     column on the units table, so it doesn't silently exceed the schema
+     CLAUDE.md enumerates.
+   - *Compare mode and the planner*: the planner uses `area` only, never
+     `compare_area`. The client's machines don't run twice against two
+     price areas — comparison is a price-pattern exploration feature
+     (required interaction #2), not a parallel production schedule.
+     Verified live: compare mode shows two independent KPI-card/heatmap
+     blocks (one per area) but exactly one planner section.
+   - *Plan ahead's "usual start" has no date*: a unit's `HH:MM` is mapped
+     to the next upcoming occurrence at or after "now" (today if not yet
+     passed, else tomorrow); if neither exists in the actual remaining
+     series, that one unit's usual-cost comparison reports as
+     unavailable rather than being guessed or crashing.
+2. **`cheapest_window`/`window_cost` take no `power_kw` argument.**
+   Cost = `power_kw * sum(window prices)` and `power_kw` is a constant
+   multiplier over the whole window, so it can never change *which*
+   window is cheapest — the search operates purely on the price shape,
+   and the caller multiplies afterward. Keeps the search function
+   reusable regardless of a unit's power draw.
+3. **`combined_peak_power` is a plain fixed-length accumulator array,
+   not a sweep-line.** Unit counts and timeline lengths here are tiny (a
+   handful of units, at most ~48 hourly positions), so O(units × hours)
+   accumulation is simple, obviously correct, and fast enough — a
+   sweep-line would buy nothing at this scale.
+4. **Heatmap discrete colour bands via a stepped `go.Heatmap` colorscale**
+   (each category's colour placed at both ends of its `[i/4,(i+1)/4]`
+   band — two same-position anchor points at each boundary read as a
+   hard step, not a gradient), `zmin=-0.5/zmax=3.5` centering integer
+   category codes within their band, and a 4-tick `colorbar` reusing
+   `CATEGORY_ORDER`/`CATEGORY_COLORS` so the heatmap and the price chart
+   are visibly the same colour language, per CLAUDE.md's "recoloured to
+   the Sprint 2 scheme."
+5. **Yearly saving shown in SEK with thousands separators, not raw
+   öre.** Caught in manual QA: a real scenario (today's SE3 prices
+   happened to swing from near-zero overnight to a moderate morning
+   ramp) produced a legitimately large per-run saving that, multiplied
+   by 365 and left in öre, rendered as an unreadable "7429769 öre."
+   Converting just this one aggregate figure to SEK (divide by 100,
+   `:,.0f` formatting) keeps it readable without touching the öre/kWh
+   unit used everywhere else in the app.
+
+### Alternatives considered and rejected (and why)
+- A `runs_per_week`/`runs_per_year` column on the units table instead of
+  a single stated global assumption — rejected; CLAUDE.md enumerates the
+  table's exact columns (name, power, hours, usual start, on/off) and
+  adding one exceeds that without being asked.
+- Duplicating the planner per compared area — rejected (Decision 1); the
+  client only buys electricity in one area, so a second parallel
+  schedule against a hypothetical SE1 contract would answer a question
+  nobody asked.
+- A sweep-line for `combined_peak_power` — rejected (Decision 3); more
+  code for no real benefit at this problem size.
+
+### Problems hit / how solved
+- Caught in manual QA, not the unit tests: the Plan ahead tab's first
+  draft of `usual_pos` combined a unit's `usual_start` **including
+  minutes** with today's/tomorrow's date and looked for an exact match
+  in the hourly-indexed remaining-price series, which only has on-the-
+  hour timestamps — any usual_start with non-zero minutes would silently
+  read as "unavailable" even though History's equivalent closure already
+  correctly used `t.hour` only. Fixed to floor to the hour the same way,
+  plus configured the `TimeColumn` widget with `step=3600` so the picker
+  itself only offers whole hours.
+- A draft from planning sketched `st.data_editor(st.session_state.get(
+  "units_df", DEFAULT_UNITS), key="units_editor", ...)` — redundant
+  double state management, since a `key`'d widget already persists its
+  own edited value in `st.session_state[key]` across reruns. Simplified
+  to `st.data_editor(DEFAULT_UNITS, key="units_editor", ...)` before it
+  was ever built.
+- A surprisingly large "saved X öre vs usual" figure during live
+  verification (see Decision 5) looked like a possible bug at first
+  glance — reproduced the exact computation directly against live SE3
+  prices before accepting it: the "usual" 06:00 start genuinely lands in
+  a ~70 öre/kWh morning ramp while the recommended window captures a
+  2-6 öre/kWh overnight trough, so a ~20x per-kWh difference on a 480 kWh
+  load is mathematically correct, not a bug — just a dramatic real price
+  swing on the day this was tested.
+
+### Open questions for next sprint
+- Sprint 4 is test-and-ship only (pytest hardening, edge cases from user
+  testing, README, Streamlit Community Cloud deploy) — no new features.
+  Worth a deliberate pass over `app.py` itself, which has no automated
+  tests (by design — it's wiring, not logic) but has grown substantially
+  across three sprints; a manual click-through checklist before deploy
+  is probably warranted since Sprint 4's "fixes from user tests" implies
+  someone other than the builder should try to break it.
+- The heatmap's relative colour scale is computed per area per date
+  range (up to 168 weekday×hour cells as the population) — worth
+  confirming this still reads sensibly for a very short History range
+  (e.g. 2-3 days), where the heatmap would have mostly-empty cells and a
+  very small population for the quantile thresholds.
+- `DEFAULT_UNITS`' two example rows (Induction furnace, Compressor line)
+  are permanent seed data shown to every first-time user — confirm this
+  is still the desired behaviour once the app is actually deployed and
+  used by someone other than the builder, versus starting from an empty
+  table.

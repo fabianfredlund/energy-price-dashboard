@@ -4,6 +4,8 @@ Pure functions only: DataFrame in, DataFrame out. No fetching, no caching,
 no Streamlit, no unit conversion (öre/kWh conversion is app.py's job).
 """
 
+from typing import NamedTuple
+
 import pandas as pd
 
 CATEGORY_ORDER = ["Cheap", "Normal", "Expensive", "Spike"]
@@ -60,3 +62,68 @@ def categorize_by_price(df: pd.DataFrame, price_col: str) -> pd.DataFrame:
     category[out[price_col] <= p33] = "Cheap"
     out["category"] = category
     return out
+
+
+class PriceKPIs(NamedTuple):
+    avg_price: float
+    cheapest_time: pd.Timestamp
+    cheapest_price: float
+    priciest_time: pd.Timestamp
+    priciest_price: float
+    daily_spread: float
+
+
+def price_kpis(df: pd.DataFrame, price_col: str) -> PriceKPIs | None:
+    """Summary stats for the KPI cards. Always call with the TRUE hourly
+    frame, never resample_daily_mean's output -- "cheapest hour" and
+    daily_spread lose their meaning on daily-aggregated rows.
+
+    Returns None for an empty df (idxmin/idxmax raise ValueError on an
+    empty Series) -- caller shows a message instead of a KPI row.
+
+    daily_spread = mean over calendar days actually present of (that
+    day's max price - that day's min price) -- the average gap between
+    each day's high and low.
+    """
+    if df.empty:
+        return None
+    s = df[price_col]
+    daily = s.groupby(s.index.date).agg(["max", "min"])
+    return PriceKPIs(
+        avg_price=float(s.mean()),
+        cheapest_time=s.idxmin(),
+        cheapest_price=float(s.min()),
+        priciest_time=s.idxmax(),
+        priciest_price=float(s.max()),
+        daily_spread=float((daily["max"] - daily["min"]).mean()),
+    )
+
+
+def hourly_weekday_means(df: pd.DataFrame, price_col: str) -> pd.DataFrame:
+    """Long-form mean price per (weekday, hour) across the period -- up
+    to 7*24=168 rows, one per weekday x hour-of-day combination actually
+    present (fewer for a short range). weekday: 0=Monday..6=Sunday
+    (pandas' own dayofweek convention). Feed straight into
+    categorize_by_price(result, price_col) unmodified -- the up-to-168
+    cells become the population for its relative quantiles.
+
+    Gotcha: grouping by df.index.dayofweek/df.index.hour directly and
+    calling reset_index() produces unnamed level_0/level_1 columns --
+    the Index objects must be .rename()d first.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["weekday", "hour", price_col])
+    weekday = df.index.dayofweek.rename("weekday")
+    hour = df.index.hour.rename("hour")
+    return df.groupby([weekday, hour])[price_col].mean().reset_index()
+
+
+def typical_hour_of_day(df: pd.DataFrame, price_col: str) -> pd.Series:
+    """Mean price per hour-of-day (0-23) across the period -- the
+    cyclical 'typical day' profile used as History mode's planner price
+    source (labelled 'typical', not a prediction). Index: hour (0-23),
+    sorted ascending.
+    """
+    if df.empty:
+        return pd.Series(dtype="float64", name=price_col)
+    return df.groupby(df.index.hour)[price_col].mean().rename(price_col).sort_index()
