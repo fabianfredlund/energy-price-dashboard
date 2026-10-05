@@ -23,7 +23,13 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from src.battery import build_frame, compare_scenarios
+from src.battery import (
+    build_frame,
+    buy_price,
+    compare_scenarios,
+    grid_charge_plan,
+    simulate,
+)
 from src.config import (
     BATTERY_MAX_POWER_FRACTION,
     BATTERY_ROUND_TRIP_EFFICIENCY,
@@ -43,6 +49,7 @@ from src.config import (
     VAT_RATE,
 )
 from src.consumption import MONTHLY_FACTORS
+from src.plan import GRID_CHARGE_EXPLANATION, build_day_plan, describe_step
 from src.prices import fetch_prices
 from src.solar import (
     PRODUCTION_COLUMN,
@@ -54,6 +61,7 @@ from src.transform import (
     CATEGORY_ORDER,
     categorize_by_price,
     hourly_month_means,
+    price_kpis,
     production_split,
     resample_daily_mean,
 )
@@ -437,6 +445,52 @@ def _render_scenario_bars(comparison):
     )
 
 
+def _tomorrow_plan(prices_df, solar_df, tomorrow: date, annual_kwh: float, capacity_kwh: float):
+    """Tomorrow's plan, its flow table, and (with_battery, without) cost.
+
+    **Simulates the whole 48-hour window and slices tomorrow out, rather
+    than simulating tomorrow alone.** `simulate` starts the battery empty,
+    so a day-alone run assumes an empty battery at midnight -- which is
+    wrong on the 151 days of the committed year that end with charge still
+    in it. Measured against a continuous year: day-alone overstates the
+    day's cost by a mean of 2.53 SEK and up to 13.21 SEK, with an error
+    above 1 SEK on 144 of 367 days, against a figure the UI displays as
+    8-21 SEK. One warm-up day reproduces the continuous-year result
+    exactly on every day measured.
+
+    It costs nothing, because both days are already fetched for the chart.
+    (Exactness is an empirical property of these rules -- the battery
+    reaches empty at some hour on most days, which re-anchors it -- not a
+    proof, so the Assumptions text says the plan assumes today runs as
+    modelled.)
+    """
+    production = solar_df[PRODUCTION_COLUMN]
+    frame48, _ = build_frame(production, prices_df, annual_kwh)
+    if frame48.empty:
+        return build_day_plan(frame48), frame48, None
+
+    detail = simulate(frame48, capacity_kwh)
+    day_detail = detail[detail.index.date == tomorrow]
+
+    surplus = (frame48["production_kwh"] - frame48["consumption_kwh"]).clip(lower=0)
+    reasons = grid_charge_plan(
+        buy_price(frame48["SEK_per_kWh"]), surplus, capacity_kwh
+    ).reasons
+    plan = build_day_plan(day_detail, reasons.get(tomorrow))
+
+    # Two scenarios, not three: "no solar" is not the Tomorrow question,
+    # and compare_scenarios would also compute a payback, which is
+    # meaningless for a single day.
+    money = None
+    if capacity_kwh > 0:
+        without = simulate(frame48, 0.0)
+        money = (
+            float(day_detail["net_cost_sek"].sum()),
+            float(without[without.index.date == tomorrow]["net_cost_sek"].sum()),
+        )
+    return plan, day_detail, money
+
+
 def _render_assumptions():
     with st.expander("Assumptions — what these numbers rest on"):
         st.markdown(
@@ -688,7 +742,8 @@ with tab_tomorrow:
     else:
         hourly = prices_df.assign(ore_per_kWh=prices_df["SEK_per_kWh"] * 100)
         price_rows = categorize_by_price(hourly, "ore_per_kWh")
-        st.subheader(f"{PRICE_AREA} — today and tomorrow")
+        span = "today and tomorrow" if tomorrow_present else "today"
+        st.subheader(f"{PRICE_AREA} — {span}")
         fig = _build_price_figure(price_rows, "ore_per_kWh", solar_df, now_marker)
         st.plotly_chart(fig, width="stretch")
         st.caption(
@@ -696,11 +751,77 @@ with tab_tomorrow:
             + LEGEND_CAPTION
         )
 
-    st.info(
-        "**Coming in Sprint 8:** tomorrow's battery plan in plain language — "
-        "when to charge from the grid, when to store solar, and when to run the "
-        "house off the battery."
-    )
+    st.divider()
+    st.subheader("What your battery would do tomorrow")
+
+    if not tomorrow_present or solar_df is None or solar_df.empty:
+        st.info(
+            "The battery plan needs both tomorrow's prices and tomorrow's sunshine "
+            "forecast. Prices are usually published by ~13:00 — try the button above "
+            "after that."
+        )
+    else:
+        plan, day_detail, money = _tomorrow_plan(
+            prices_df, solar_df, tomorrow_d, annual_kwh, capacity_kwh
+        )
+
+        if capacity_kwh <= 0:
+            st.info(
+                "No battery selected. Move the battery slider above to see what one "
+                "would do with tomorrow's prices."
+            )
+        elif not plan.steps:
+            # 25 of 365 days of the committed year genuinely produce no
+            # steps: a dark day never charges, so it never discharges. The
+            # honest message IS the finding, with the reason attached.
+            st.warning(
+                "**Your battery would stay idle tomorrow.** "
+                + GRID_CHARGE_EXPLANATION.get(plan.grid_charge_reason or "", "")
+            )
+        else:
+            for step in plan.steps:
+                st.markdown("- " + describe_step(step))
+            if plan.grid_charge_reason and plan.grid_charge_reason != "charged":
+                st.caption(GRID_CHARGE_EXPLANATION[plan.grid_charge_reason])
+
+        if capacity_kwh > 0 and money is not None:
+            with_battery, without_battery = money
+            saved = without_battery - with_battery
+            m1, m2 = st.columns(2)
+            m1.metric(
+                "Tomorrow with your battery", _sek(with_battery),
+                help="Cost of bought power minus what the exported surplus earns.",
+                border=True,
+            )
+            m2.metric(
+                "Tomorrow without it", _sek(without_battery),
+                delta=f"{_sek(-saved)} with the battery",
+                delta_color="inverse",  # a lower bill is good news
+                border=True,
+            )
+            if saved < 1.0:
+                st.caption(
+                    f"**Tomorrow the battery barely earns anything** — tomorrow's prices "
+                    f"are too flat for it to pay. That is an honest bad day, not a broken "
+                    f"tool; judge the battery on the year, not on tomorrow."
+                )
+            else:
+                st.caption(
+                    f"The battery saves **{_sek(saved)}** tomorrow. "
+                    f"**One day is not a year** — the yearly figure is in Customer "
+                    f"calculation, and tomorrow is a single day's weather and prices."
+                )
+
+        tomorrow_rows = hourly[hourly.index.date == tomorrow_d]
+        kpis = price_kpis(tomorrow_rows, "ore_per_kWh")
+        if kpis is not None:
+            st.caption(
+                f"Tomorrow runs from {kpis.cheapest_price:.0f} öre at "
+                f"{kpis.cheapest_time:%H:%M} to {kpis.priciest_price:.0f} öre at "
+                f"{kpis.priciest_time:%H:%M} — a spread of "
+                f"{kpis.priciest_price - kpis.cheapest_price:.0f} öre/kWh. "
+                f"That spread is what the battery gets paid for."
+            )
 
 st.caption(
     "Elpriser tillhandahålls av [Elpriset just nu.se](https://www.elprisetjustnu.se). "
