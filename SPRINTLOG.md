@@ -845,3 +845,117 @@ prices with real solar production instead of temperature.
 - `config.py`'s values are placeholders pending Fabian's verification;
   Sprint 6 adds the tax/grid/battery constants, which are the ones that
   actually drive the SEK figures an advisor will quote.
+
+## Sprint 6 — Model (2026-10-05)
+
+### Goal
+`solar.py`, `consumption.py`, `battery.py`, `config.py` with tests
+including the mandatory energy balance test. Done when all three
+scenarios return yearly SEK values and all tests pass.
+
+### Built
+- `src/config.py`: buy/sell price components (energy tax 36 öre excl VAT,
+  grid fee 27 öre, VAT 25%, nätnytta placeholder), battery parameters,
+  advisor-input defaults. All marked for verification.
+- `src/consumption.py`: the villa load assumption — a 24-hour shape with
+  morning and evening peaks × 12 monthly factors, anchored to a reference
+  year.
+- `src/battery.py`: buy/sell pricing, the four hourly rules, the grid-charge
+  allowance, the hourly simulation, the three scenarios and payback.
+- `tests/test_consumption.py` (13) and `tests/test_battery.py` (75),
+  including the balance test parametrized over 12 fixtures × 4 scenarios.
+- A full year of real cached data (SE3 prices + irradiance for both
+  orientations, 8760 hours each, zero failures) committed as offline
+  fallback.
+
+### Reused from v1 / adapted / new
+- **Reused:** `calc.cheapest_window` for the grid-charge window (exactly the
+  reuse the pivot table anticipated); `prices.py`'s column name and
+  `(df, failed, fallback)` result shape; `cache.py` unchanged; the test
+  style and `conftest.py` fixtures.
+- **Adapted:** `solar.py`'s `production_kwh` feeds the model directly.
+- **New:** `consumption.py`, `battery.py`, the price model, the scenarios.
+
+### Decisions (and why)
+1. **The energy balance needed a fourth production term.** `production =
+   own use + to battery + sold` cannot hold alongside "never sell at a
+   negative price", because that surplus is neither used, stored nor sold.
+   Added `curtailed`. On the real year it is only 35 kWh (0.3%), all in
+   May, but it is the honest term and it becomes a donut slice in Sprint 7
+   — power thrown away is itself an argument for a battery.
+2. **`bought_for_house_kwh` is tracked separately from `grid_charge_kwh`.**
+   Folding them into one "bought" column silently breaks the consumption
+   invariant, because grid-charge energy goes into the battery, not the
+   house.
+3. **Round-trip loss is booked entirely on discharge** — "10 kWh in, 9 kWh
+   out" is one sentence for a customer. Both invariants still hold exactly
+   because each closes with a residual: `to_battery` is metered at the
+   input, `from_battery` at the output, so the loss lives inside the
+   battery and appears in neither identity.
+4. **Rule 4 compares buy prices, not spot, and its margin is additive.**
+   You pay tax, grid fee and VAT on the ~10% the round trip throws away,
+   so a spot-based test recommends grid charging on days that lose money.
+   And at a negative price a percentage margin *lowers* the bar instead of
+   raising it.
+5. **"Never sell at a negative price" means the sell price, not spot.** The
+   price received is spot + nätnytta, so the two readings differ exactly in
+   the −5..0 öre band where most SE3 negative hours sit.
+6. **Consumption is anchored to a reference year, not to the simulated
+   period.** Scaling weights to sum to the annual figure over whatever
+   index is passed would bill a full year's electricity across a one-week
+   simulation — and Sprint 7's Tomorrow view is a single day.
+7. **Payback stays exactly as CLAUDE.md specifies** (Fabian's call), with
+   the three exclusions — green-technology deduction, capacity/effekt
+   tariffs, frequency regulation — stated in config and required in the UI.
+   On real data it lands at 23.8 years, which is honest rather than
+   flattering, and the advisor can explain what is missing.
+
+### Alternatives considered and rejected (and why)
+- *Counting curtailed energy as "sold at 0 SEK"* to preserve the
+  three-term identity — rejected; it would mix kWh that earned money with
+  kWh that earned nothing and quietly distort Sprint 7's donut.
+- *sqrt(0.9) on each side of the round trip* — more conventional, but
+  "94.87% each way" is not explainable at a kitchen table.
+- *Fetching the year on demand* — rejected (Fabian's call): ~1 MB committed
+  buys an instant, API-outage-proof demo in front of a customer.
+
+### Problems hit / how solved
+- **Rule 4 as literally specified made the battery actively harmful.**
+  Caught by the self-consumption test, not by inspection: on a sunny June
+  day the battery grid-charged to 100% at 03:00 and sat full, so the whole
+  day's solar surplus had nowhere to go and `to_battery` was exactly zero.
+  The battery was *reducing* self-consumption — the opposite of the
+  product's thesis. Rule 4 only looks at prices and cannot see that a
+  surplus is coming. Fixed (with Fabian's go-ahead) by reserving room for
+  the sun: the day's grid-charge budget is `capacity − expected surplus`,
+  floored at zero. Verified on the real year — summer now charges from
+  solar (1105 kWh vs 37 from the grid) and winter from the grid (791 vs
+  129), which is exactly what the rule was written for.
+- **A real DST bug in Sprint 5's `solar.py`.** `_slice_to_range` used
+  `Timedelta(days=1)` (24 absolute hours) instead of `DateOffset(days=1)`.
+  Verified: the 23-hour spring-forward day returned 24 rows spilling into
+  the next date, and concatenating days duplicated `2026-03-30 00:00`. It
+  would have corrupted exactly the year-long frame this sprint builds.
+  Fixed and pinned with two regression tests.
+- **The repo's CLAUDE.md was still the v1 industrial brief** — zero
+  mentions of solar, battery or Kustsol. The v2 brief existed only in the
+  working session, so the repo had no record of what drove Sprints 5–8 and
+  a future session could have followed v1 and undone the pivot. Written in
+  as a separate commit, with Sprint 5's inventory corrections folded in
+  rather than re-introducing the rows already known to be wrong.
+- An invariant test passes trivially on all-zero data, so the balance test
+  has a companion that asserts each fixture still drives the branch it
+  exists for. Without it, an edit that quietly zeroed a branch would leave
+  the suite green.
+
+### Open questions for next sprint
+- **Payback is 23.8 years on real data.** Honest, but it is the number a
+  customer will fixate on. Sprint 7 must present it alongside the three
+  stated exclusions, and it is worth deciding whether the green-technology
+  deduction belongs in the quoted figure.
+- `nätnytta` is still a 5 öre placeholder — the only config constant with
+  no source behind it, and it moves every export figure.
+- The consumption profile is a plausible shape, not a measured one. If a
+  real villa load profile is available it would materially raise the
+  credibility of the self-consumption share, which is the single number
+  the whole battery case rests on.

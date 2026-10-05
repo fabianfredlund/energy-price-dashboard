@@ -56,3 +56,45 @@ SYSTEM_LOSS_FACTOR = 0.85
 # Sprint 7 replaces this with the advisor's kWp slider; until then the
 # overlay needs some system size to render a production line at all.
 SPIKE_DEFAULT_KWP = 10.0
+
+# --- Buy and sell price components (SEK per kWh) ---------------------------
+# buy  = (spot + energy tax + grid fee) * (1 + VAT)
+# sell = spot + grid benefit            (no VAT: a private microproducer is
+#                                        normally not VAT-registered for this)
+#
+# TODO: Fabian verifies all four against the customer's actual contract and
+# grid operator -- these drive every SEK figure the advisor quotes.
+ENERGY_TAX_SEK_PER_KWH = 0.36  # 36 öre excl VAT (45 öre incl) for 2026
+GRID_FEE_SEK_PER_KWH = 0.27  # variable transmission, ~33.75 öre incl VAT
+VAT_RATE = 0.25  # applies to the whole bill, including the energy tax itself
+GRID_BENEFIT_SEK_PER_KWH = 0.05  # nätnytta -- PLACEHOLDER, not yet sourced
+
+# Deliberately NOT modelled: the fixed annual grid charge (~175 kr/ampere of
+# main fuse). It does not change with solar or a battery, so it cancels out of
+# every scenario difference. Worth knowing that capacity/effekt tariffs live
+# here, which is one reason the payback figure below looks conservative.
+
+# --- Battery ---------------------------------------------------------------
+# The round trip is booked entirely on discharge, so the rule an advisor says
+# out loud is "put 10 kWh in, get 9 kWh back".
+BATTERY_ROUND_TRIP_EFFICIENCY = 0.90
+# Max charge/discharge in one hour = capacity x this. At 0.5 a full charge
+# takes exactly two hours, which is why the grid-charge window search below
+# is always a 2-hour window.
+BATTERY_MAX_POWER_FRACTION = 0.5
+# Grid charging must beat the round-trip loss by at least this much per kWh.
+# Additive, not a percentage: at a negative cheap price a percentage margin
+# would lower the bar instead of raising it.
+# TODO: Fabian verifies against the real cached year.
+GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH = 0.10
+
+# --- Advisor input defaults ------------------------------------------------
+# TODO: Fabian verifies -- starting points for the Sprint 7 input panel.
+DEFAULT_ANNUAL_CONSUMPTION_KWH = 20000.0  # electrically heated villa
+DEFAULT_BATTERY_KWH = 10.0
+DEFAULT_BATTERY_PRICE_SEK = 75000.0  # installed, before any deduction
+
+# Payback deliberately excludes the green-technology deduction,
+# capacity/effekt-tariff savings and frequency-regulation income -- the three
+# places Swedish home-battery economics actually lives. The UI must say so,
+# because they are why an honest payback figure looks long.

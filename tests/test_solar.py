@@ -20,6 +20,7 @@ from src.solar import (
     _cache_key,
     _combine_azimuths,
     _parse_hourly,
+    _slice_to_range,
     fetch_irradiance,
     production_kwh,
 )
@@ -125,6 +126,37 @@ def test_combine_azimuths_east_west_is_the_mean_of_both_surfaces():
 
 def test_combine_azimuths_empty_returns_empty():
     assert _combine_azimuths([]).empty
+
+
+# -- _slice_to_range across DST ------------------------------------------------
+
+def _three_days_around_spring_forward() -> pd.DataFrame:
+    idx = pd.date_range(
+        "2026-03-27 23:00", "2026-03-31 00:00", freq="h", tz="UTC"
+    ).tz_convert("Europe/Stockholm")
+    return pd.DataFrame({"irradiance_w_m2": range(len(idx))}, index=idx)
+
+
+def test_slice_to_range_spring_forward_day_has_23_hours_on_one_date():
+    # Regression test: Timedelta(days=1) is 24 *absolute* hours, so the
+    # 23-hour day returned 24 rows spilling into 2026-03-30.
+    df = _three_days_around_spring_forward()
+    day = _slice_to_range(df, date(2026, 3, 29), date(2026, 3, 29))
+    assert len(day) == 23
+    assert {ts.date() for ts in day.index} == {date(2026, 3, 29)}
+
+
+def test_slice_to_range_consecutive_days_do_not_overlap():
+    # The same bug duplicated 2026-03-30 00:00 when days were concatenated,
+    # which would have corrupted any year-long frame.
+    df = _three_days_around_spring_forward()
+    days = [
+        _slice_to_range(df, d, d)
+        for d in (date(2026, 3, 28), date(2026, 3, 29), date(2026, 3, 30))
+    ]
+    combined = pd.concat(days)
+    assert not combined.index.has_duplicates
+    assert [len(d) for d in days] == [24, 23, 24]
 
 
 def test_cache_key_separates_orientations_and_encodes_tilt():

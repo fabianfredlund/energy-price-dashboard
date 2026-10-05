@@ -181,10 +181,20 @@ def _combine_azimuths(frames: list[pd.DataFrame]) -> pd.DataFrame:
 
 
 def _slice_to_range(df: pd.DataFrame, start_date: date, end_date: date) -> pd.DataFrame:
+    """Local-calendar slice, end-exclusive at the next calendar midnight.
+
+    Uses DateOffset, not Timedelta: `Timedelta(days=1)` is 24 *absolute*
+    hours, which on the spring-forward day lands at 01:00 the next
+    morning -- so a 23-hour day would return 24 rows spilling into the
+    next date, and concatenating consecutive days duplicated an hour.
+    DateOffset moves to the next calendar midnight whatever the day's
+    length. (Found in Sprint 6 while building the first year-long frame;
+    it would have corrupted two days a year.)
+    """
     if df.empty:
         return df
     start_ts = pd.Timestamp(start_date, tz="Europe/Stockholm")
-    end_ts = pd.Timestamp(end_date, tz="Europe/Stockholm") + pd.Timedelta(days=1)
+    end_ts = pd.Timestamp(end_date, tz="Europe/Stockholm") + pd.DateOffset(days=1)
     return df.loc[(df.index >= start_ts) & (df.index < end_ts)]
 
 
