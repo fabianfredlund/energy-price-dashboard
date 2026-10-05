@@ -959,3 +959,161 @@ scenarios return yearly SEK values and all tests pass.
   real villa load profile is available it would materially raise the
   credibility of the self-consumption share, which is the single number
   the whole battery case rests on.
+
+## Sprint 7 — Adapt "Customer calculation" (2026-10-05)
+
+### Goal
+Inputs, KPI cards, overlay, donut, scenario comparison, heatmap,
+assumptions expander. Done when an advisor can answer questions 1–5 for a
+made-up customer.
+
+### Built
+- `app.py` rewritten around the advisor's five inputs: a bordered input
+  panel above two tabs, now "Customer calculation" and "Tomorrow".
+- Four KPI cards (`st.metric(border=True)`): value of solar, value of the
+  battery, self-consumption share, payback — with two distinct empty
+  states for payback ("enter a price" vs "this size saves nothing").
+- Overlay chart (price bars + production in a second panel on the same
+  time axis), donut, three-scenario horizontal bars, hour × month heatmap,
+  assumptions expander reading every number from `config`.
+- A cached computation layer: four `st.cache_data` functions keyed on
+  scalars only.
+- `transform.hourly_month_means` and `transform.production_split` with 10
+  new tests; the v1 planner and its 13 tests removed. 164 passing.
+
+### Reused from v1 / adapted / new
+- **Reused unchanged:** `_build_price_figure` (stacked panels),
+  `_render_fallback_notices`, `CATEGORY_COLORS` and the categorisation,
+  `prices.py`, `cache.py`, `solar.py`, the footer attributions.
+- **Adapted:** the heatmap's discrete-colour-band technique, now hour ×
+  month instead of hour × weekday; the date range selector, now scoping
+  the chart rather than the whole page.
+- **New:** the input panel, the SEK KPI cards, the donut, the scenario
+  bars, the assumptions expander, `hourly_month_means`,
+  `production_split`.
+- **Removed:** `_render_planner`, `DEFAULT_UNITS`, the production-units
+  `st.data_editor`, `calc`'s planner functions,
+  `transform.typical_hour_of_day` and `transform.hourly_weekday_means`.
+
+### Decisions (and why)
+1. **The date picker scopes the chart only** (Fabian's call). Every yearly
+   SEK figure, the donut, the bars and the heatmap always cover the full
+   12 months; the picker zooms the overlay. Extrapolating a hand-picked
+   sunny week into a "yearly" figure would be indefensible in front of a
+   customer. The UI says so in a caption under the KPI row, because the
+   two controls sitting on one page otherwise imply they interact.
+2. **The 12-month window and the default chart week are both derived, not
+   hardcoded.** `end = today − 2 days` (Open-Meteo's archive lag),
+   `start = end − 364`; the chart defaults to mid-June inside that window.
+   A hardcoded range silently falls outside the window as it rolls
+   forward, and the derived one lands exactly on the committed year —
+   8760 rows, zero missing hours.
+3. **Prices are cached keyed on the window only, never on orientation.**
+   Both orientations are computed for question 5; keying them together
+   would fetch a year of prices twice on first load.
+4. **No `ttl` on the two year-long fetchers.** The cache key *is* the
+   window, so it self-invalidates when the window rolls over at midnight,
+   and a settled past spot price never changes. The `ttl=3600` carried
+   over from v1 would have re-issued 365 requests every hour of a working
+   session — a stall mid-meeting and poor citizenship toward a free API.
+   `max_entries` is set everywhere instead, because `cache_data` pickles
+   and a `ScenarioComparison` carries three 8760-row detail frames.
+5. **Question 5 is one caption line, not a fifth KPI card.** Orientation
+   moves the battery's value by 24% but the panels' by only 9% (south
+   12 204 / 3 153 SEK/yr, east–west 11 060 / 2 403, payback 24 vs 31
+   years). That asymmetry is a genuinely useful sales fact — a flatter
+   east–west curve already matches the household's morning and evening
+   peaks, so less has to go through the battery — and it is invisible if
+   the advisor must flip the dropdown and hold a number in their head. A
+   fifth card would imply a peer metric; a second chart would double the
+   page for one comparison.
+6. **The donut's colours were computed, not chosen.** Its four
+   destinations are *ordinal* — own use → battery → sold → curtailed is a
+   strict value ranking — so the dataviz skill prescribes a one-hue ramp,
+   darkest = most valuable. Running its validator settled it: the blue
+   ramp passes all four checks, while the obvious four-hue categorical
+   alternative **hard-fails** the normal-vision separation floor
+   (#eda100 ↔ #eb6834 at ΔE 13.7 against a floor of 15) — and a donut
+   compares every slice with every other through its legend. Reusing
+   `CATEGORY_COLORS` was out regardless: that is the reserved status
+   palette.
+7. **The scenario comparison is a bar chart, not a table.** It makes
+   "20 201 vs 35 610 SEK" a visible length difference, which three numbers
+   in a table do not; with direct SEK labels it is a table as well. One
+   hue for all three bars and no legend, since bar length already encodes
+   the progression.
+8. **Per-kWh rates stay in öre/kWh; every total is SEK.** CLAUDE.md says
+   "never öre for totals", and öre/kWh is the conventional Swedish unit
+   for a *rate*. Totals use a thin space as the thousands separator.
+9. **`window_cost` kept although it is now test-only.** Sprint 8's
+   plain-language battery plan ("charge from the grid 02–05") needs to
+   price exactly that window shape. Documented in the function itself:
+   Sprint 8 either uses it or deletes it, it must not sit dead a third
+   sprint.
+
+### Alternatives considered and rejected (and why)
+- *Letting the date picker drive everything*, so the KPI cards reflect the
+  picked range — rejected per decision 1; it invites quoting a sunny
+  week's economics as a yearly figure.
+- *A fifth KPI card, or a second chart, for the orientation comparison* —
+  rejected per decision 5.
+- *Four distinct hues for the donut* — rejected because the validator
+  hard-fails it, not on taste.
+- *A table for the three scenarios* — rejected per decision 7.
+- *Hardcoding the payback figure's exclusions into prose in `app.py`* —
+  rejected; the expander reads every number from `config`, so the UI
+  cannot drift from the calculation.
+
+### Problems hit / how solved
+- **A three-scenario comparison took 1.1–1.3 s, and 94% of it was one
+  line.** `grid_charge_allowance` rebuilt `expected_surplus.index.date` —
+  an array as long as the whole series — once per calendar day, i.e. 365
+  passes over 8760 rows. Replaced with a single `groupby` before the loop:
+  1.102 s → 0.301 s (3.7×) south, 1.263 s → 0.335 s (3.8×) east–west,
+  output identical to 4.4e-15 across every column of all three detail
+  frames. This was outside the sprint's literal scope but it gates
+  CLAUDE.md's "adjusts the battery size live with the customer", and it is
+  what makes computing both orientations affordable. The old scan is kept
+  in the tests as an oracle the optimised version must match elementwise,
+  over a span containing both DST transitions; pinned to behaviour rather
+  than to SEK figures, which shift whenever the cache gains a day. The
+  guard was itself verified by mutating the lookup — it fails.
+- **The committed cache is a *fallback*, not a fast path.**
+  `fetch_prices` only reads `data/cache/` when a day fails, so a 12-month
+  view is 365 live HTTP requests and a cold load is ~13 s. Mitigated with
+  spinner messages on the cached fetchers; the real fix is logged below.
+- **A test failure that was the fixture, not the function.** A new
+  `hourly_month_means` test started at 31 Jan 23:00 UTC expecting to span
+  two months — but Stockholm winter midnight is UTC 23:00 the *previous*
+  day, so all 48 hours landed in February. The same trap as Sprint 2; the
+  fixture now explains it.
+- **A date label that hid a year boundary.** Zooming the chart to the full
+  window rendered "04 Oct – 03 Oct 2026", which reads as one year. Found
+  by driving the app, not by a unit test — `app.py` has no unit tests by
+  design. The start now carries its year whenever the two differ.
+- **Verifying a Streamlit page without a browser.** Playwright is not in
+  the venv. Streamlit's own `AppTest` runs the real script with real
+  widget values and surfaces uncaught exceptions, which turned out better
+  than a browser for this: it let the scoping claim in decision 1 be
+  checked mechanically — change the picker, assert all four KPI cards are
+  byte-identical — rather than by eye.
+
+### Open questions for next sprint
+- **Make the committed cache a fast path for settled days.** A past day's
+  spot price is immutable, so reading cache-first for any day before today
+  would be correct and would cut the ~13 s cold load to near nothing. It
+  changes `prices.py`'s semantics, so it belongs in Sprint 8, which owns
+  deployment — and on Community Cloud, where the app sleeps and cold-starts
+  for real visitors, this matters far more than it does locally.
+- **The one unverified item is visual.** `kaleido` is not installed, so the
+  donut's outside labels at the 0.3% curtailed sliver and the heatmap's
+  month order were verified structurally but never rendered to an image.
+  Worth an eyeball during the Sprint 8 user test (or installing kaleido as
+  a dev dependency, which needs Fabian's go-ahead).
+- Payback is 24 years for the default customer and 330 years for a 2 kWp
+  system on 1 000 kWh — honest, but Sprint 8's user test should check
+  whether advisors read it as useful or as a reason to distrust the tool.
+- `nätnytta` is still an unsourced 5 öre placeholder; the assumptions
+  expander now flags it in the UI with a warning sign.
+- The consumption profile is still a plausible shape, not measured data —
+  now disclosed in both the expander and the footer.
