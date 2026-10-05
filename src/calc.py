@@ -1,18 +1,17 @@
-"""Cheapest-window search and the v1 load-shift planner's arithmetic.
+"""Cheapest-window search.
 
-The window search (cheapest_window / window_cost) carries over to v2,
-where it picks the cheapest hours to charge a battery from the grid. The
-per-unit planner functions below are v1's load-shift calculator and are
-replaced in Sprint 7 when the production-units table becomes the
-customer-input panel.
+The one piece of v1's calculator that survived the pivot. It now has a
+single production consumer: `src/battery.py`'s rule 4, which uses it to
+pick the cheapest contiguous hours of a day to charge the battery from
+the grid. v1's load-shift planner (`plan_unit`, `planner_totals`,
+`yearly_saving_estimate` and friends) was removed in Sprint 7 together
+with the production-units table it served.
 
 Pure functions only, no Streamlit, no real "now"/calendar awareness --
 every position here is a plain integer offset into whatever price series
-the caller passes (a real timestamp-indexed remaining-hours series for
-Plan ahead, or a 24-value hour-of-day "typical day" series for History).
-app.py owns turning those positions back into real timestamps or HH:MM
-labels, since that mapping depends on wall-clock "now" and calendar dates
-this module deliberately knows nothing about.
+the caller passes. The caller owns turning those positions back into real
+timestamps, since that mapping depends on wall-clock "now" and calendar
+dates this module deliberately knows nothing about.
 """
 
 from typing import NamedTuple, Sequence
@@ -30,13 +29,17 @@ def cheapest_window(prices: Sequence[float], hours: int, wrap: bool = False) -> 
     which window is cheapest -- deliberately no power_kw argument; the
     caller multiplies afterwards (see window_cost).
 
-    wrap=False (Plan ahead's finite remaining-hours series): a window
-    that doesn't fit (hours > len(prices)) returns None -- "not enough
-    priced hours remaining", not a crash.
-    wrap=True (History's cyclical typical-day profile): a window may
-    wrap from the end back to the start. Still None if hours exceeds
-    len(prices) -- a window longer than one full cycle has no single
-    well-defined wrap-once start.
+    wrap=False (what battery.py's rule 4 passes: one calendar day's
+    hours): a window that doesn't fit (hours > len(prices)) returns
+    None -- "not enough priced hours in this day", not a crash. That
+    case is real, since a fall-back day has 25 hours and a spring-
+    forward day only 23.
+    wrap=True (a cyclical hour-of-day profile): a window may wrap from
+    the end back to the start. Still None if hours exceeds len(prices) --
+    a window longer than one full cycle has no single well-defined
+    wrap-once start. No production caller uses wrap=True since the
+    pivot; it is kept because it costs one line and a day-cyclical
+    battery schedule is a plausible Sprint 8 need.
 
     None for hours <= 0 or empty `prices` too. Ties resolve to the
     earliest start position.
@@ -63,10 +66,15 @@ def window_cost(
 ) -> float | None:
     """Cost of running `hours` at `power_kw` starting at position
     `start` in `prices` -- the same window shape cheapest_window
-    searches over, but for an arbitrary caller-supplied start (used to
-    price a unit's *usual* start for comparison, and to re-price
-    cheapest_window's own recommended start so the power_kw
-    multiplication happens in exactly one place).
+    searches over, but for an arbitrary caller-supplied start, so a
+    chosen window can be priced without re-searching.
+
+    **Currently exercised only by tests.** Its v1 caller was removed in
+    Sprint 7 along with the planner. It is kept rather than deleted
+    because Sprint 8's plain-language battery plan ("charge from the grid
+    02-05") needs to put a SEK figure on exactly this window shape.
+    Sprint 8 either uses it or deletes it -- it must not sit here dead
+    for a third sprint.
 
     None if the window doesn't fit: start out of [0, len(prices)) range,
     hours <= 0, empty prices, hours > len(prices), or (wrap=False only)
@@ -84,86 +92,3 @@ def window_cost(
         total = sum(prices[start : start + hours])
     return power_kw * total
 
-
-def energy_kwh(power_kw: float, hours: int) -> float:
-    """Energy per run = power_kw * hours. 0 kW or 0 hours -> 0.0, a
-    legitimate 'this unit contributes nothing' result, not an error."""
-    return power_kw * hours
-
-
-class UnitPlan(NamedTuple):
-    energy_kwh: float
-    recommended_start: int | None
-    recommended_cost: float | None
-    usual_cost: float | None
-    fits: bool  # False only if the run length doesn't fit the priced window at all
-
-
-def plan_unit(
-    prices: Sequence[float],
-    hours: int,
-    power_kw: float,
-    usual_start: int | None,
-    wrap: bool = False,
-) -> UnitPlan:
-    """Bundles the per-unit arithmetic (recommended start + cost, usual-
-    start cost, energy per run) into one pure, directly testable
-    function, so app.py only converts real timestamps/HH:MM to and from
-    integer positions and renders the result -- it never re-derives this
-    arithmetic.
-
-    0 kW or 0 hours -> a legitimate no-op unit: energy_kwh=0.0,
-    recommended_cost=0.0, usual_cost=0.0, fits=True, recommended_start=0
-    (nothing to optimize, not an error).
-
-    usual_start=None (app.py could not map the unit's chosen HH:MM onto
-    this priced window at all) -> usual_cost is also None;
-    recommended_* is still computed independently, so one unit's
-    unmappable usual-start never blocks its own recommendation.
-    """
-    energy = energy_kwh(power_kw, hours)
-    if power_kw <= 0 or hours <= 0:
-        return UnitPlan(energy, 0, 0.0, 0.0, fits=True)
-
-    found = cheapest_window(prices, hours, wrap=wrap)
-    if found is None:
-        return UnitPlan(energy, None, None, None, fits=False)
-
-    recommended_cost = window_cost(prices, found.start, hours, power_kw, wrap=wrap)
-    usual_cost = (
-        window_cost(prices, usual_start, hours, power_kw, wrap=wrap)
-        if usual_start is not None
-        else None
-    )
-    return UnitPlan(energy, found.start, recommended_cost, usual_cost, fits=True)
-
-
-class PlannerTotals(NamedTuple):
-    total_energy_kwh: float
-    total_usual_cost: float
-    total_recommended_cost: float
-    total_saving: float
-
-
-def planner_totals(unit_plans: Sequence[UnitPlan]) -> PlannerTotals:
-    """Totals across active units' plans. Empty input -> all-zero
-    totals, not a crash (sum of an empty sequence is 0, never max()/
-    division). A unit whose usual_cost or recommended_cost is None
-    (doesn't fit) contributes 0 to that specific sum rather than
-    poisoning the total with None.
-    """
-    total_energy = sum(p.energy_kwh for p in unit_plans)
-    total_usual = sum(p.usual_cost for p in unit_plans if p.usual_cost is not None)
-    total_recommended = sum(
-        p.recommended_cost for p in unit_plans if p.recommended_cost is not None
-    )
-    return PlannerTotals(total_energy, total_usual, total_recommended, total_usual - total_recommended)
-
-
-def yearly_saving_estimate(total_saving_per_run: float, runs_per_year: int = 365) -> float:
-    """total_saving_per_run * runs_per_year. Answers "per year" savings
-    (CLAUDE.md's problem statement, Q3) from an explicit, stated
-    assumption (default: one run per day) rather than a silent guess --
-    the caller states that assumption in the UI alongside this figure.
-    """
-    return total_saving_per_run * runs_per_year

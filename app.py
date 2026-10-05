@@ -1,12 +1,12 @@
-"""Sprint 5 (pivot spike): SE3 spot prices with real solar production
-overlaid, replacing v1's temperature overlay.
+"""SE3 spot prices with real solar production overlaid.
 
-Still carrying v1's production-units planner -- Sprint 7 replaces that
-with the advisor's customer inputs (consumption, kWp, orientation,
-battery), so this is deliberately a transitional, half-pivoted page.
+v1's production-units planner has been removed; the advisor's customer
+inputs (consumption, kWp, orientation, battery) and the SEK figures that
+hang off them arrive later in Sprint 7, so this is still a transitional
+page: prices and production, no customer calculation yet.
 """
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -14,7 +14,6 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from src.calc import plan_unit, planner_totals, yearly_saving_estimate
 from src.config import (
     DEFAULT_ORIENTATION,
     PANEL_TILT_DEG,
@@ -35,7 +34,6 @@ from src.transform import (
     hourly_weekday_means,
     price_kpis,
     resample_daily_mean,
-    typical_hour_of_day,
 )
 
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
@@ -269,75 +267,6 @@ def _render_price_chart(prices_df, title, solar_df, span_days, now_marker=None, 
         _render_heatmap(prices_df, "ore_per_kWh")
 
 
-def _render_planner(units_df, prices, position_labels, usual_pos_fn, wrap, caption):
-    active = units_df[
-        units_df["active"].fillna(False) & (units_df["name"].astype(str).str.strip() != "")
-    ]
-    if active.empty:
-        st.info("No active production units — add one above or switch a unit on.")
-        return
-
-    plans, lines = [], []
-    for _, row in active.iterrows():
-        hours = int(row["hours"]) if pd.notna(row["hours"]) else 0
-        power_kw = float(row["power_kw"]) if pd.notna(row["power_kw"]) else 0.0
-        usual_pos = usual_pos_fn(row["usual_start"]) if pd.notna(row["usual_start"]) else None
-        plan = plan_unit(prices, hours, power_kw, usual_pos, wrap=wrap)
-        plans.append(plan)
-
-        if not plan.fits:
-            lines.append(f"**{row['name']}**: run length ({hours}h) doesn't fit the available priced hours.")
-            continue
-        label = position_labels[plan.recommended_start] if plan.recommended_start is not None else "—"
-        lines.append(f"Start **{row['name']}** at {label} — est. cost {plan.recommended_cost:.1f} öre.")
-        if usual_pos is None and pd.notna(row["usual_start"]):
-            lines.append(f"  ↳ usual start for {row['name']} isn't within the priced window — no comparison available.")
-
-    for line in lines:
-        st.write(line)
-
-    totals = planner_totals(plans)
-    yearly = yearly_saving_estimate(totals.total_saving)
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total energy", f"{totals.total_energy_kwh:.1f} kWh")
-    c2.metric(
-        "Total cost (recommended)", f"{totals.total_recommended_cost:.1f} öre",
-        f"saved {totals.total_saving:.1f} öre vs usual",
-    )
-    c3.metric("Yearly saving (est.)", f"{yearly / 100:,.0f} SEK")
-    st.caption(
-        caption + " Yearly figure assumes one run per day; not a forecast. "
-        "Grid/capacity charges are not modelled — spot price only."
-    )
-
-
-DEFAULT_UNITS = pd.DataFrame({
-    "name": ["Induction furnace", "Compressor line"],
-    "power_kw": [120.0, 45.0],
-    "hours": [4, 3],
-    "usual_start": [time(6, 0), time(22, 0)],
-    "active": [True, True],
-})
-
-st.subheader("Production units")
-st.caption("Add your flexible loads here — used by the planner in both tabs below.")
-units_df = st.data_editor(
-    DEFAULT_UNITS,
-    key="units_editor",
-    num_rows="dynamic",
-    hide_index=True,
-    column_config={
-        "name": st.column_config.TextColumn("Name", required=True),
-        "power_kw": st.column_config.NumberColumn("Power (kW)", min_value=0.0, step=1.0),
-        "hours": st.column_config.NumberColumn("Run length (h)", min_value=1, step=1, format="%d"),
-        "usual_start": st.column_config.TimeColumn("Usual start", format="HH:mm", step=3600),
-        "active": st.column_config.CheckboxColumn("Active"),
-    },
-)
-
-show_solar = st.checkbox("Show solar production", value=True)
-
 tab_history, tab_plan = st.tabs(["History", "Plan ahead"])
 
 with tab_history:
@@ -350,15 +279,14 @@ with tab_history:
         span_days = (end - start).days + 1
 
         solar_df = None
-        if show_solar:
-            try:
-                irradiance, s_failed, s_fallback = _cached_fetch_irradiance(
-                    start, end, DEFAULT_ORIENTATION
-                )
-                _render_fallback_notices(s_fallback, s_failed)
-                solar_df = production_kwh(irradiance, SPIKE_DEFAULT_KWP)
-            except Exception:
-                st.error("Solar data unavailable right now; showing prices only.")
+        try:
+            irradiance, s_failed, s_fallback = _cached_fetch_irradiance(
+                start, end, DEFAULT_ORIENTATION
+            )
+            _render_fallback_notices(s_fallback, s_failed)
+            solar_df = production_kwh(irradiance, SPIKE_DEFAULT_KWP)
+        except Exception:
+            st.error("Solar data unavailable right now; showing prices only.")
 
         prices_df, p_failed, p_fallback = _cached_fetch_prices_history(start, end, PRICE_AREA)
         _render_fallback_notices(p_fallback, p_failed)
@@ -367,38 +295,20 @@ with tab_history:
             span_days, show_insight=True,
         )
 
-        hourly_ore = prices_df.assign(ore=prices_df["SEK_per_kWh"] * 100)
-        typical = typical_hour_of_day(hourly_ore, "ore")
-        if typical.empty:
-            st.info("Not enough data to build a typical-day profile for the planner.")
-        else:
-            typical_prices = typical.tolist()
-            typical_labels = [f"{h:02d}:00" for h in typical.index]
-
-            def _typical_usual_pos(t, _index=list(typical.index)):
-                return _index.index(t.hour) if t.hour in _index else None
-
-            _render_planner(
-                units_df, typical_prices, typical_labels, _typical_usual_pos, wrap=True,
-                caption="History: typical savings based on the selected period's average "
-                        "price per hour of day — not a prediction.",
-            )
-
 with tab_plan:
     now = _now_stockholm()
     today, tomorrow = now.date(), now.date() + timedelta(days=1)
     now_marker = pd.Timestamp(now).floor("h") + pd.Timedelta(minutes=30)
 
     solar_df = None
-    if show_solar:
-        try:
-            irradiance, s_failed, s_fallback = _cached_fetch_irradiance_forecast(
-                today, tomorrow, DEFAULT_ORIENTATION
-            )
-            _render_fallback_notices(s_fallback, s_failed)
-            solar_df = production_kwh(irradiance, SPIKE_DEFAULT_KWP)
-        except Exception:
-            st.error("Solar forecast unavailable right now; showing prices only.")
+    try:
+        irradiance, s_failed, s_fallback = _cached_fetch_irradiance_forecast(
+            today, tomorrow, DEFAULT_ORIENTATION
+        )
+        _render_fallback_notices(s_fallback, s_failed)
+        solar_df = production_kwh(irradiance, SPIKE_DEFAULT_KWP)
+    except Exception:
+        st.error("Solar forecast unavailable right now; showing prices only.")
 
     prices_df, p_failed, p_fallback = _cached_fetch_prices_planahead(today, tomorrow, PRICE_AREA)
     _render_fallback_notices(p_fallback, p_failed)
@@ -414,34 +324,6 @@ with tab_plan:
         prices_df, f"{PRICE_AREA} — today and tomorrow", solar_df,
         span_days=2, now_marker=now_marker,
     )
-
-    now_floor = pd.Timestamp(now).floor("h")
-    remaining = prices_df[prices_df.index >= now_floor].assign(
-        ore=lambda d: d["SEK_per_kWh"] * 100
-    )
-    if remaining.empty:
-        st.info("No remaining priced hours today to plan against.")
-    else:
-        remaining_prices = remaining["ore"].tolist()
-        remaining_labels = [t.strftime("%Y-%m-%d %H:%M") for t in remaining.index]
-
-        def _remaining_usual_pos(t):
-            # Floor to the hour (ignore minutes) -- the priced series is
-            # hourly, so any usual_start with non-zero minutes would never
-            # match an exact timestamp. Try today's occurrence of that hour
-            # first, then tomorrow's, matching how a "usual start time"
-            # actually recurs day to day.
-            for day_offset in (0, 1):
-                day = (now_floor + pd.Timedelta(days=day_offset)).date()
-                candidate = pd.Timestamp.combine(day, time(t.hour, 0)).tz_localize(STOCKHOLM)
-                if candidate in remaining.index:
-                    return remaining.index.get_loc(candidate)
-            return None
-
-        _render_planner(
-            units_df, remaining_prices, remaining_labels, _remaining_usual_pos, wrap=False,
-            caption="Plan ahead: based on actual published prices from now onward.",
-        )
 
 st.caption(
     "Elpriser tillhandahålls av [Elpriset just nu.se](https://www.elprisetjustnu.se). "
