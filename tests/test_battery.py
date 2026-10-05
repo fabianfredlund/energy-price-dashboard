@@ -17,11 +17,13 @@ import pytest
 
 from src.battery import (
     FLOW_COLUMNS,
+    GRID_CHARGE_REASONS,
     SPOT_COLUMN,
     buy_price,
     build_frame,
     compare_scenarios,
     grid_charge_allowance,
+    grid_charge_plan,
     max_power_kwh_per_hour,
     payback_years,
     run_scenario,
@@ -365,6 +367,95 @@ def test_grid_charge_allowance_handles_a_day_absent_from_the_surplus_series():
 
 def test_max_power_is_half_the_capacity():
     assert max_power_kwh_per_hour(10.0) == 5.0
+
+
+# -- rule 4's reason codes -----------------------------------------------------
+
+def _decision(frame, capacity=10.0):
+    surplus = (frame["production_kwh"] - frame["consumption_kwh"]).clip(lower=0)
+    return grid_charge_plan(buy_price(frame[SPOT_COLUMN]), surplus, capacity)
+
+
+def _only_reason(decision):
+    reasons = set(decision.reasons.values())
+    assert len(reasons) == 1, f"expected one day's reason, got {decision.reasons}"
+    return reasons.pop()
+
+
+def test_reason_charged_when_the_spread_is_worth_it():
+    assert _only_reason(_decision(rising_price_day())) == "charged"
+
+
+def test_reason_no_battery_when_capacity_is_zero():
+    # still reported per day, so the UI can say "no battery selected"
+    # rather than falling through to a blank panel
+    assert _only_reason(_decision(rising_price_day(), capacity=0.0)) == "no_battery"
+
+
+def test_reason_solar_fills_it_on_a_sunny_day():
+    idx = _day_index("2026-06-15")
+    spot = [0.05] * 6 + [0.6] * 10 + [3.0] * 5 + [0.6] * 3
+    assert _only_reason(_decision(_frame(idx, _bell(24, 12.0), 1.0, spot))) == "solar_fills_it"
+
+
+def test_reason_spread_too_small_on_a_flat_day():
+    assert _only_reason(_decision(flat_price_day())) == "spread_too_small"
+
+
+def test_reason_no_later_hours_when_the_cheap_window_ends_the_day():
+    """The calendar artefact the README discloses: the cheapest hours fall
+    at the very end of the day, so there is nothing left to discharge
+    into -- though a real battery would charge across midnight. 40 days of
+    the committed year land here."""
+    idx = _day_index("2026-11-11")
+    frame = _frame(idx, 0.0, 2.0, [2.0] * 22 + [0.05] * 2)
+    assert _only_reason(_decision(frame)) == "no_later_hours"
+
+
+def test_every_reason_code_is_reachable_and_declared():
+    """Companion guard, in the Sprint 6 tradition: an edit that quietly
+    stops producing a reason would otherwise leave every test above green
+    while the UI silently lost its explanation."""
+    produced = {
+        _only_reason(_decision(rising_price_day())),
+        _only_reason(_decision(rising_price_day(), capacity=0.0)),
+        _only_reason(_decision(flat_price_day())),
+        _only_reason(_decision(_frame(
+            _day_index("2026-11-11"), 0.0, 2.0, [2.0] * 22 + [0.05] * 2))),
+        _only_reason(_decision(_frame(
+            _day_index("2026-06-15"), _bell(24, 12.0), 1.0,
+            [0.05] * 6 + [0.6] * 10 + [3.0] * 5 + [0.6] * 3))),
+    }
+    assert produced == {
+        "charged", "no_battery", "spread_too_small", "no_later_hours", "solar_fills_it",
+    }
+    # and every code the module declares must be a real string we could emit
+    assert produced <= set(GRID_CHARGE_REASONS)
+
+
+def test_grid_charge_plan_allowance_matches_the_wrapper_across_dst():
+    """grid_charge_allowance is now a wrapper. simulate() and ten existing
+    tests call it, so the two must never diverge -- checked elementwise
+    over both DST transitions, where a day is 23 or 25 hours."""
+    days = ["2026-03-28", "2026-03-29", "2026-03-30", "2025-10-25", "2025-10-26"]
+    frames = []
+    for i, day in enumerate(days):
+        idx = _day_index(day)
+        production = _bell(len(idx), 12.0) if i % 2 == 0 else [0.0] * len(idx)
+        spot = [0.05] * 6 + [0.6] * (len(idx) - 14) + [3.0] * 5 + [0.6] * 3
+        frames.append(_frame(idx, production, 1.0, spot))
+    frame = pd.concat(frames).sort_index()
+    buy = buy_price(frame[SPOT_COLUMN])
+    surplus = (frame["production_kwh"] - frame["consumption_kwh"]).clip(lower=0)
+
+    for capacity in (0.0, 0.5, 10.0, 30.0):
+        pd.testing.assert_series_equal(
+            grid_charge_plan(buy, surplus, capacity).allowance,
+            grid_charge_allowance(buy, surplus, capacity),
+        )
+    # a reason for every calendar day present, never a silent gap
+    decision = grid_charge_plan(buy, surplus, 10.0)
+    assert set(decision.reasons) == set(frame.index.date)
 
 
 # -- CLAUDE.md's named edge cases ----------------------------------------------

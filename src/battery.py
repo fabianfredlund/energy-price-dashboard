@@ -80,6 +80,82 @@ def max_power_kwh_per_hour(capacity_kwh: float) -> float:
     return capacity_kwh * BATTERY_MAX_POWER_FRACTION
 
 
+#: Why rule 4 declined to grid-charge on a given day. Codes, not prose --
+#: the customer-facing wording lives in src/plan.py, so the Tomorrow tab
+#: can explain the decision without this module knowing about the UI.
+#: Measured frequency over the committed year at 10 kWh, in case the
+#: relative weight is ever surprising: solar_fills_it 181 days,
+#: no_later_hours 40, spread_too_small 6.
+GRID_CHARGE_REASONS = (
+    "charged",             # it did grid-charge
+    "no_battery",          # capacity is zero
+    "solar_fills_it",      # the expected solar surplus already fills the battery
+    "no_later_hours",      # the cheapest window falls at the end of the day
+    "spread_too_small",    # the cheap hours don't beat the round trip plus margin
+    "window_does_not_fit", # the day is shorter than the window needed
+)
+
+
+class GridChargeDecision(NamedTuple):
+    allowance: pd.Series
+    reasons: dict  # date -> one of GRID_CHARGE_REASONS
+
+
+def grid_charge_plan(
+    buy: pd.Series,
+    expected_surplus: pd.Series,
+    capacity_kwh: float,
+    margin: float = GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH,
+    efficiency: float = BATTERY_ROUND_TRIP_EFFICIENCY,
+) -> GridChargeDecision:
+    """Rule 4, returning *why* it decided what it decided.
+
+    Same arithmetic as `grid_charge_allowance` (which is now a thin
+    wrapper around this), plus a per-day reason code. The reason exists
+    because "your battery will not charge from the grid tomorrow" is
+    useless to an advisor standing in front of a customer, while "the roof
+    is expected to make more than the battery holds" is a selling point.
+
+    See `grid_charge_allowance` for the rules themselves.
+    """
+    allowance = pd.Series(0.0, index=buy.index)
+    reasons: dict = {}
+    power = max_power_kwh_per_hour(capacity_kwh)
+
+    if capacity_kwh <= 0 or power <= 0:
+        return GridChargeDecision(allowance, {d: "no_battery" for d in set(buy.index.date)})
+    if buy.empty:
+        return GridChargeDecision(allowance, reasons)
+
+    surplus_by_day = expected_surplus.groupby(expected_surplus.index.date).sum()
+
+    for day, day_buy in buy.groupby(buy.index.date):
+        budget = capacity_kwh - float(surplus_by_day.get(day, 0.0))
+        if budget <= 0:
+            reasons[day] = "solar_fills_it"
+            continue
+
+        window_hours = max(1, math.ceil(budget / power))
+        found = cheapest_window(day_buy.tolist(), window_hours, wrap=False)
+        if found is None:
+            reasons[day] = "window_does_not_fit"
+            continue
+        cheap_mean = found.total_price / window_hours
+        later = day_buy.iloc[found.start + window_hours :]
+        if later.empty:
+            reasons[day] = "no_later_hours"
+            continue
+        dearest = later.nlargest(min(window_hours, len(later)))
+        if dearest.mean() * efficiency - cheap_mean > margin:
+            hours = day_buy.index[found.start : found.start + window_hours]
+            allowance.loc[hours] = budget / window_hours
+            reasons[day] = "charged"
+        else:
+            reasons[day] = "spread_too_small"
+
+    return GridChargeDecision(allowance, reasons)
+
+
 def grid_charge_allowance(
     buy: pd.Series,
     expected_surplus: pd.Series,
@@ -118,37 +194,24 @@ def grid_charge_allowance(
     Both matter: you pay tax, grid fee and VAT on the energy the round
     trip throws away, and at a negative price a percentage margin would
     lower the bar instead of raising it.
+
+    **Known limitation, disclosed in the README rather than fixed.** The
+    decision is taken within a single calendar day, so on the 40 days of
+    the committed year where the cheapest window falls at 22:00-24:00
+    there is nothing left to discharge into and rule 4 declines -- a
+    *calendar artefact*, not economics, since a real battery charges
+    across midnight. Fixing it in the final sprint would move every figure
+    the report already quotes (`no_later_hours` in GRID_CHARGE_REASONS).
+
+    Implementation note: one grouped sum up front, not a boolean scan per
+    day. The scan version rebuilt `expected_surplus.index.date` -- an
+    array as long as the whole series -- once per calendar day, which over
+    a year is 365 passes across 8760 rows and measured as 94% of a
+    three-scenario comparison.
     """
-    allowance = pd.Series(0.0, index=buy.index)
-    power = max_power_kwh_per_hour(capacity_kwh)
-    if capacity_kwh <= 0 or power <= 0 or buy.empty:
-        return allowance
-
-    # One grouped sum up front, not a boolean scan per day. The scan
-    # version rebuilt `expected_surplus.index.date` -- an array as long as
-    # the whole series -- once per calendar day, which over a year is 365
-    # passes across 8760 rows and measured as 94% of a three-scenario
-    # comparison. Same arithmetic, same groups, 5.7x faster overall.
-    surplus_by_day = expected_surplus.groupby(expected_surplus.index.date).sum()
-
-    for day, day_buy in buy.groupby(buy.index.date):
-        budget = capacity_kwh - float(surplus_by_day.get(day, 0.0))
-        if budget <= 0:
-            continue  # the sun will fill it; leave the room free
-
-        window_hours = max(1, math.ceil(budget / power))
-        found = cheapest_window(day_buy.tolist(), window_hours, wrap=False)
-        if found is None:
-            continue  # day shorter than the window
-        cheap_mean = found.total_price / window_hours
-        later = day_buy.iloc[found.start + window_hours :]
-        if later.empty:
-            continue  # nothing left to discharge into
-        dearest = later.nlargest(min(window_hours, len(later)))
-        if dearest.mean() * efficiency - cheap_mean > margin:
-            hours = day_buy.index[found.start : found.start + window_hours]
-            allowance.loc[hours] = budget / window_hours
-    return allowance
+    return grid_charge_plan(
+        buy, expected_surplus, capacity_kwh, margin, efficiency
+    ).allowance
 
 
 def simulate(
