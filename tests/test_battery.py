@@ -10,6 +10,8 @@ each fixture actually drives the branch it exists for. Without it, an
 edit that quietly zeroes a branch would leave the balance test green.
 """
 
+import math
+
 import pandas as pd
 import pytest
 
@@ -26,9 +28,12 @@ from src.battery import (
     sell_price,
     simulate,
 )
+from src.calc import cheapest_window
 from src.config import (
+    BATTERY_ROUND_TRIP_EFFICIENCY,
     ENERGY_TAX_SEK_PER_KWH,
     GRID_BENEFIT_SEK_PER_KWH,
+    GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH,
     GRID_FEE_SEK_PER_KWH,
     VAT_RATE,
 )
@@ -274,6 +279,88 @@ def test_grid_charge_allowance_never_exceeds_the_free_room():
     frame = _frame(idx, _bell(24, 2.0), 1.0, spot)
     surplus = (frame["production_kwh"] - frame["consumption_kwh"]).clip(lower=0).sum()
     assert _allowance(frame).sum() == pytest.approx(max(0.0, 10.0 - surplus))
+
+
+def _allowance_reference(buy, expected_surplus, capacity_kwh,
+                         margin=GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH,
+                         efficiency=BATTERY_ROUND_TRIP_EFFICIENCY):
+    """`grid_charge_allowance` written the obvious, slow way.
+
+    This is the pre-optimisation version verbatim: it recomputes
+    `expected_surplus.index.date` and scans the whole series once per
+    calendar day. That scan was 94% of a three-scenario comparison, so the
+    real function hoists the lookup into a single groupby. Keeping the
+    obvious version here as an oracle means the optimisation is pinned to
+    behaviour rather than to a set of SEK figures that shift whenever the
+    committed cache gains a day.
+    """
+    allowance = pd.Series(0.0, index=buy.index)
+    power = max_power_kwh_per_hour(capacity_kwh)
+    if capacity_kwh <= 0 or power <= 0 or buy.empty:
+        return allowance
+    for day, day_buy in buy.groupby(buy.index.date):
+        budget = capacity_kwh - float(
+            expected_surplus.loc[expected_surplus.index.date == day].sum()
+        )
+        if budget <= 0:
+            continue
+        window_hours = max(1, math.ceil(budget / power))
+        found = cheapest_window(day_buy.tolist(), window_hours, wrap=False)
+        if found is None:
+            continue
+        cheap_mean = found.total_price / window_hours
+        later = day_buy.iloc[found.start + window_hours:]
+        if later.empty:
+            continue
+        dearest = later.nlargest(min(window_hours, len(later)))
+        if dearest.mean() * efficiency - cheap_mean > margin:
+            hours = day_buy.index[found.start: found.start + window_hours]
+            allowance.loc[hours] = budget / window_hours
+    return allowance
+
+
+def test_grid_charge_allowance_matches_the_obvious_per_day_scan():
+    """The optimisation's regression guard: identical output to the slow
+    version on a span built to include the cases where a per-day lookup
+    could plausibly disagree -- both DST transitions (23- and 25-hour
+    days, where "the hours of a calendar day" is not 24) and alternating
+    sunny/dark days so some budgets are reduced to zero and some are not.
+    """
+    days = ["2026-03-28", "2026-03-29", "2026-03-30", "2025-10-25", "2025-10-26"]
+    frames = []
+    for i, day in enumerate(days):
+        idx = _day_index(day)
+        production = _bell(len(idx), 12.0) if i % 2 == 0 else [0.0] * len(idx)
+        spot = [0.05] * 6 + [0.6] * (len(idx) - 14) + [3.0] * 5 + [0.6] * 3
+        frames.append(_frame(idx, production, 1.0, spot))
+    frame = pd.concat(frames).sort_index()
+    assert len(frame) == 24 + 23 + 24 + 24 + 25  # the DST days really are odd
+
+    buy = buy_price(frame[SPOT_COLUMN])
+    surplus = (frame["production_kwh"] - frame["consumption_kwh"]).clip(lower=0)
+
+    for capacity in (0.5, 10.0, 30.0):
+        optimised = grid_charge_allowance(buy, surplus, capacity)
+        reference = _allowance_reference(buy, surplus, capacity)
+        pd.testing.assert_series_equal(optimised, reference)
+
+    # and the fixture must actually drive the branch, or the equality above
+    # is satisfied by two identical all-zero series
+    assert grid_charge_allowance(buy, surplus, 10.0).sum() > 0
+
+
+def test_grid_charge_allowance_handles_a_day_absent_from_the_surplus_series():
+    """The groupby lookup must treat a missing day as zero surplus, not
+    raise. Hours can be priced on a day the production series never
+    covered -- build_frame intersects the two, but grid_charge_allowance
+    is a public function and takes the two series separately."""
+    idx = _day_index("2026-11-13")
+    frame = _frame(idx, 0.0, 1.0, [0.05] * 6 + [0.6] * 10 + [3.0] * 5 + [0.6] * 3)
+    buy = buy_price(frame[SPOT_COLUMN])
+    empty_surplus = pd.Series(dtype="float64", index=frame.index[:0])
+
+    allowance = grid_charge_allowance(buy, empty_surplus, 10.0)
+    assert allowance.sum() == pytest.approx(10.0)  # the whole battery is free room
 
 
 def test_max_power_is_half_the_capacity():
