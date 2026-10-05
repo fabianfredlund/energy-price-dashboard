@@ -412,7 +412,7 @@ def _render_scenario_bars(comparison):
         ("Solar + battery", comparison.solar_battery),
     ]
     names = [name for name, _ in scenarios]
-    costs = [s.yearly_cost_sek for _, s in scenarios]
+    costs = [s.cost_sek for _, s in scenarios]
 
     fig = go.Figure(
         go.Bar(

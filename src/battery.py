@@ -84,8 +84,8 @@ def max_power_kwh_per_hour(capacity_kwh: float) -> float:
 #: the customer-facing wording lives in src/plan.py, so the Tomorrow tab
 #: can explain the decision without this module knowing about the UI.
 #: Measured frequency over the committed year at 10 kWh, in case the
-#: relative weight is ever surprising: solar_fills_it 181 days,
-#: no_later_hours 40, spread_too_small 6.
+#: relative weight is ever surprising: solar_fills_it 182 days, charged
+#: 138, no_later_hours 40, spread_too_small 7.
 GRID_CHARGE_REASONS = (
     "charged",             # it did grid-charge
     "no_battery",          # capacity is zero
@@ -359,7 +359,7 @@ def build_frame(
 
 class ScenarioResult(NamedTuple):
     name: str
-    yearly_cost_sek: float
+    cost_sek: float
     self_consumption_share: float  # of production used on site (own use + battery)
     detail: pd.DataFrame
 
@@ -397,8 +397,8 @@ def compare_scenarios(
     solar_only = run_scenario(frame, 0.0, with_solar=True)
     solar_battery = run_scenario(frame, capacity_kwh, with_solar=True)
 
-    solar_value = no_solar.yearly_cost_sek - solar_only.yearly_cost_sek
-    battery_value = solar_only.yearly_cost_sek - solar_battery.yearly_cost_sek
+    solar_value = no_solar.cost_sek - solar_only.cost_sek
+    battery_value = solar_only.cost_sek - solar_battery.cost_sek
     return ScenarioComparison(
         no_solar, solar_only, solar_battery,
         solar_value, battery_value,

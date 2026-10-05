@@ -528,9 +528,9 @@ def test_three_scenarios_return_yearly_sek_values():
     """Sprint 6's done-when gate."""
     result = compare_scenarios(_year_frame(), capacity_kwh=10.0, battery_price_sek=75000.0)
     for scenario in (result.no_solar, result.solar_only, result.solar_battery):
-        assert isinstance(scenario.yearly_cost_sek, float)
-    assert result.no_solar.yearly_cost_sek > result.solar_only.yearly_cost_sek
-    assert result.solar_only.yearly_cost_sek > result.solar_battery.yearly_cost_sek
+        assert isinstance(scenario.cost_sek, float)
+    assert result.no_solar.cost_sek > result.solar_only.cost_sek
+    assert result.solar_only.cost_sek > result.solar_battery.cost_sek
     assert result.solar_value_sek > 0
     assert result.battery_value_sek > 0
 
@@ -540,7 +540,7 @@ def test_no_solar_cost_equals_the_closed_form():
     frame = _year_frame()
     result = run_scenario(frame, 0.0, with_solar=False)
     expected = (frame["consumption_kwh"] * buy_price(frame[SPOT_COLUMN])).sum()
-    assert result.yearly_cost_sek == pytest.approx(expected)
+    assert result.cost_sek == pytest.approx(expected)
 
 
 def test_a_battery_raises_the_self_consumption_share():
