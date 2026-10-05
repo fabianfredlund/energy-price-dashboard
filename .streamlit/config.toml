@@ -1,0 +1,24 @@
+# Pinned light theme.
+#
+# Streamlit's `theme.base` defaults to unset, which means the app follows
+# the *visitor's* OS dark-mode preference. Every Plotly figure here is
+# built with `template="plotly_white"`, the donut's slice borders are the
+# light surface colour, and the dataviz palette was validated against a
+# light surface -- so a visitor in dark mode would get white charts pasted
+# onto a dark page. Pinning light is the one-line fix.
+#
+# Proper dark-mode support would mean a second Plotly template and a
+# second palette revalidated against the dark surface. Out of scope for
+# the final sprint, and noted in the README's limitations.
+[theme]
+base = "light"
+backgroundColor = "#fcfcfb"          # matches SURFACE in app.py
+secondaryBackgroundColor = "#f2f1ec"  # input panel and metric cards
+textColor = "#0b0b0b"
+primaryColor = "#2a78d6"             # matches SCENARIO_COLOR in app.py
+
+[client]
+# Hide the rerun / clear-cache / deploy menu from visitors. "auto" already
+# hides it for non-developers on Community Cloud; this is belt and braces,
+# and it matters because the public link is shown to customers.
+toolbarMode = "viewer"

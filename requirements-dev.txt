@@ -1,0 +1,7 @@
+# Local development and testing. Streamlit Community Cloud installs
+# requirements.txt only, so nothing here reaches production -- which is
+# the point: pytest was previously shipped to the deployed app.
+-r requirements.txt
+
+pytest==9.1.1
+kaleido==1.4.0   # renders Plotly figures to PNG so charts can be eyeballed

@@ -119,7 +119,21 @@ FLOW_COLORS = {
 SCENARIO_COLOR = "#2a78d6"
 SURFACE = "#fcfcfb"
 
-st.set_page_config(page_title="Solar Advisor", layout="wide")
+st.set_page_config(
+    page_title="Solar Advisor",
+    page_icon="☀️",
+    layout="wide",
+    menu_items={
+        "about": (
+            "**Solar Advisor** — a sales tool for the energy advisors of Kustsol AB, "
+            "a **fictional** solar installer in the Gothenburg region.\n\n"
+            "Built as a course assignment for Digital Leadership, University of "
+            "Gothenburg. Spot prices from elprisetjustnu.se; weather data by "
+            "Open-Meteo.com. Household consumption is a modelled assumption, not "
+            "measured data. Not financial advice."
+        )
+    },
+)
 st.title("Solar Advisor")
 st.caption(
     f"Does solar — and a battery — pay off for this customer? "
@@ -219,16 +233,19 @@ def _cached_fetch_irradiance_forecast(start, end, orientation):
     return fetch_irradiance_forecast(start, end, orientation)
 
 
-def _render_fallback_notices(fallback_days: list, failed_days: list) -> None:
+def _render_fallback_notices(fallback_days: list, failed_days: list, source: str = "data") -> None:
+    """Outage notices. `source` names which feed degraded -- without it a
+    simultaneous price and sunshine outage shows two identical messages
+    and the advisor cannot tell what is missing."""
     if fallback_days:
         st.info(
-            f"{len(fallback_days)} day(s) served from the offline cache — "
-            f"API was unreachable, used the last cached snapshot."
+            f"{len(fallback_days)} day(s) of {source} served from the offline cache — "
+            f"the API was unreachable, so the last saved snapshot was used."
         )
     if failed_days:
         st.warning(
-            f"{len(failed_days)} day(s) could not be fetched and had no "
-            f"cached fallback: {failed_days}"
+            f"{len(failed_days)} day(s) of {source} could not be fetched and had no "
+            f"cached snapshot: {failed_days}"
         )
 
 
@@ -376,6 +393,13 @@ def _render_donut(detail):
         st.info("No production in this period, so there is nothing to split.")
         return
 
+    # Drop destinations that got nothing: with no battery, "To battery
+    # 0 kWh (0.0%)" is a zero-width slice with an outside label and a
+    # legend entry, which reads as a rendering fault. The filter is
+    # `> 0`, deliberately not a "too small to see" threshold -- curtailed
+    # is only 0.3% and must survive, since power thrown away is itself an
+    # argument for a battery.
+    split = split[split > 0]
     labels = list(split.index)
     fig = go.Figure(
         go.Pie(
@@ -385,18 +409,18 @@ def _render_donut(detail):
                 colors=[FLOW_COLORS[label] for label in labels],
                 line=dict(color=SURFACE, width=2),
             ),
-            texttemplate="%{label}<br>%{percent}",
+            texttemplate="%{label}<br>%{percent:.1%}",
             # outside, not inside: the curtailed slice is a fraction of a
             # percent and an inside label would collide with its neighbour
             textposition="outside",
-            hovertemplate="%{label}<br>%{value:,.0f} kWh/yr (%{percent})<extra></extra>",
+            hovertemplate="%{label}<br>%{value:,.0f} kWh/yr (%{percent:.1%})<extra></extra>",
         )
     )
     fig.update_layout(
         template="plotly_white", showlegend=True,
         title="Where the solar power goes (last 12 months)",
-        annotations=[dict(text=f"{total:,.0f}<br>kWh/yr", x=0.5, y=0.5,
-                          showarrow=False, font=dict(size=16))],
+        annotations=[dict(text=f"{total:,.0f}".replace(",", "\u00a0") + "<br>kWh/yr",
+                          x=0.5, y=0.5, showarrow=False, font=dict(size=16))],
     )
     st.plotly_chart(fig, width="stretch")
 
@@ -582,8 +606,8 @@ with tab_customer:
             window_start, window_end, orientation, kwp, annual_kwh
         )
         p_failed, p_fallback, s_failed, s_fallback = notices
-        _render_fallback_notices(p_fallback, p_failed)
-        _render_fallback_notices(s_fallback, s_failed)
+        _render_fallback_notices(p_fallback, p_failed, "spot prices")
+        _render_fallback_notices(s_fallback, s_failed, "sunshine")
     except Exception:
         st.error(
             "Could not load 12 months of data right now. Check the connection and "
@@ -612,11 +636,20 @@ with tab_customer:
         help="Yearly electricity cost without solar, minus the cost with solar only.",
         border=True,
     )
-    k2.metric(
-        "Value of the battery", f"{_sek(comparison.battery_value_sek)}/yr",
-        help="What the battery adds on top of the panels, over the same 12 months.",
-        border=True,
-    )
+    if capacity_kwh <= 0:
+        # "0 SEK/yr" reads as a disappointing result rather than as "you
+        # haven't asked the question yet"
+        k2.metric(
+            "Value of the battery", "—",
+            help="No battery selected — move the battery slider to size one.",
+            border=True,
+        )
+    else:
+        k2.metric(
+            "Value of the battery", f"{_sek(comparison.battery_value_sek)}/yr",
+            help="What the battery adds on top of the panels, over the same 12 months.",
+            border=True,
+        )
     k3.metric(
         "Self-consumption", f"{comparison.solar_battery.self_consumption_share:.0%}",
         help=(
@@ -720,7 +753,7 @@ with tab_tomorrow:
         irradiance, s_failed, s_fallback = _cached_fetch_irradiance_forecast(
             today_d, tomorrow_d, orientation
         )
-        _render_fallback_notices(s_fallback, s_failed)
+        _render_fallback_notices(s_fallback, s_failed, "sunshine forecast")
         solar_df = production_kwh(irradiance, kwp)
     except Exception:
         st.error("Solar forecast unavailable right now; showing prices only.")
@@ -728,14 +761,20 @@ with tab_tomorrow:
     prices_df, p_failed, p_fallback = _cached_fetch_prices_tomorrow(
         today_d, tomorrow_d, PRICE_AREA
     )
-    _render_fallback_notices(p_fallback, p_failed)
+    _render_fallback_notices(p_fallback, p_failed, "spot prices")
 
     tomorrow_present = not prices_df.empty and (prices_df.index.date == tomorrow_d).any()
     if not tomorrow_present:
         if tomorrow_d in p_failed:
-            st.warning("Tomorrow's prices could not be fetched and have no cached fallback.")
+            st.warning("Tomorrow's prices could not be fetched and have no cached snapshot.")
         else:
             st.info("Tomorrow's prices aren't published yet (usually by ~13:00). Showing today only.")
+        # Without this, the 10-minute cache can keep saying "not published"
+        # for up to 10 minutes after they appear -- the one moment where an
+        # advisor would conclude the tool is broken and be unable to fix it.
+        if st.button("Check again"):
+            _cached_fetch_prices_tomorrow.clear()
+            st.rerun()
 
     if prices_df.empty:
         st.info("No published prices for today or tomorrow.")
