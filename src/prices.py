@@ -32,13 +32,24 @@ reason about), per CLAUDE.md's "fetch day files politely: small thread
 pool, timeouts, retries" rule. A successful fetch is written through to
 src/cache.py's day-granularity CSV cache; a transient failure (not a
 confirmed 404) falls back to that cache if a snapshot exists.
+
+Sprint 8 addition: the cache is now also a **fast path**, not only an
+outage fallback. A day strictly before today is settled -- its price was
+fixed at auction and cannot change -- so a valid snapshot is served
+without touching the API. Measured on the committed year: 10.3s and 365
+requests down to 1.6s and none. This is what makes the deployed app
+usable, since Streamlit Community Cloud sleeps and cold-starts for every
+new visitor. Today and tomorrow are deliberately excluded: tomorrow's
+prices publish mid-afternoon, and that must never be answered from a
+snapshot.
 """
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -53,6 +64,8 @@ RETRY_BACKOFF_SECONDS = 1.5
 MAX_WORKERS = 4
 
 PRICE_COLUMNS = ["SEK_per_kWh", "EUR_per_kWh", "EXR"]
+
+STOCKHOLM = ZoneInfo("Europe/Stockholm")
 
 
 class PriceFetchResult(NamedTuple):
@@ -108,6 +121,44 @@ def _fetch_day(day: date, area: str) -> tuple[list | None, bool]:
     return None, True
 
 
+def _today_stockholm() -> date:
+    """Today's calendar date in Europe/Stockholm.
+
+    Stockholm, not UTC, because every date in this codebase is a Stockholm
+    calendar date: the API's URL path, the cache filename, and which rows
+    land in which file. (UTC would also be *safe*, since UTC's date is
+    never ahead of Stockholm's, but it would pointlessly refuse to use the
+    cache between local midnight and 01:00/02:00.)
+    """
+    return datetime.now(STOCKHOLM).date()
+
+
+def _expected_hours(day: date) -> int:
+    """How many hourly rows that Stockholm calendar day really has.
+
+    23 on spring-forward, 25 on fall-back, 24 otherwise -- computed from
+    the zone rather than assumed, which is the whole point: a hardcoded 24
+    would reject the two DST days' snapshots every year.
+    """
+    start = pd.Timestamp(day, tz=STOCKHOLM)
+    end = start + pd.DateOffset(days=1)
+    return len(pd.date_range(start, end, freq="h", inclusive="left"))
+
+
+def _read_settled_cache(cache_root: Path, area: str, day: date) -> pd.DataFrame | None:
+    """A cached snapshot for a *settled* past day, or None.
+
+    Returns None unless the snapshot has exactly the number of rows that
+    day should have. A half-written or truncated file would otherwise be
+    served forever, since this path never consults the API to notice.
+    Falling through to the network is always the safe answer.
+    """
+    cached = read_day_cache(cache_root, "prices", area, day, PRICE_COLUMNS)
+    if cached is None or len(cached) != _expected_hours(day):
+        return None
+    return cached
+
+
 def _parse_day(records: list) -> pd.DataFrame:
     """Pure: raw day records -> tz-aware hourly DataFrame (Europe/Stockholm).
 
@@ -127,8 +178,19 @@ def fetch_prices(
     end_date: date,
     area: str = "SE3",
     cache_root: Path = DEFAULT_CACHE_ROOT,
+    today: date | None = None,
 ) -> PriceFetchResult:
     """Fetch SE-area spot prices for [start_date, end_date] inclusive.
+
+    A day strictly before `today` is **settled**: its spot price was fixed
+    at auction and can never change, so a valid cached snapshot is served
+    directly and the API is not consulted at all. Today and tomorrow are
+    always fetched live -- "is tomorrow published yet" must never be
+    answered from a snapshot. Pass `today` explicitly to make this
+    deterministic (tests must, or they rot as the clock moves).
+
+    A settled-cache hit is the *primary* source, not a degraded one, so it
+    appears in neither `failed_days` nor `fallback_days`.
 
     Returns a PriceFetchResult(df, failed_days, fallback_days):
     - df: hourly DataFrame indexed by tz-aware Europe/Stockholm timestamps,
@@ -144,14 +206,34 @@ def fetch_prices(
     if area not in VALID_AREAS:
         raise ValueError(f"area must be one of {VALID_AREAS}, got {area!r}")
 
+    if today is None:
+        today = _today_stockholm()
+
     days = _date_range(start_date, end_date)
+
+    # Partition before the pool, so settled days cost no request at all.
+    # A year of prices is 365 separate day files; serving them from disk
+    # takes ~1.6s against ~10s over the network.
+    settled: dict[date, pd.DataFrame] = {}
+    to_fetch: list[date] = []
+    for day in days:
+        cached = _read_settled_cache(cache_root, area, day) if day < today else None
+        if cached is not None:
+            settled[day] = cached
+        else:
+            to_fetch.append(day)
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        fetch_results = list(pool.map(lambda d: _fetch_day(d, area), days))
+        fetched = dict(zip(to_fetch, pool.map(lambda d: _fetch_day(d, area), to_fetch)))
 
     frames = []
     failed_days = []
     fallback_days = []
-    for day, (records, failed) in zip(days, fetch_results):
+    for day in days:  # walk `days`, not the partitions, so the concat stays sorted
+        if day in settled:
+            frames.append(settled[day])
+            continue
+        records, failed = fetched[day]
         if records:
             day_df = _parse_day(records)
             frames.append(day_df)

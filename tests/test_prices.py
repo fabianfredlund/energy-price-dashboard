@@ -12,12 +12,27 @@ live: a repeated local hour on fall-back, a skipped one on spring-forward.
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+import pytest
 import requests
 
 from src.cache import read_day_cache, write_day_cache
-from src.prices import PRICE_COLUMNS, _fetch_day, _parse_day, fetch_prices
+from src.prices import (
+    PRICE_COLUMNS,
+    _expected_hours,
+    _fetch_day,
+    _parse_day,
+    fetch_prices,
+)
 
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
+
+# Every fetch_prices test pins `today` explicitly. Two reasons: a day
+# before today is now served straight from the cache without touching the
+# API, which changes what these tests are asserting; and their fixture
+# dates are "in the past" only because of the wall clock, so without this
+# they would quietly change behaviour as time passes.
+TEST_TODAY = date(2026, 1, 1)
 
 
 def _quarter_hour_records(utc_start: datetime, count: int) -> list[dict]:
@@ -161,7 +176,7 @@ def test_fetch_prices_transient_failure_falls_back_to_cache(monkeypatch, cache_r
     monkeypatch.setattr(requests, "get", lambda url, timeout: _FakeResponse(503))
     monkeypatch.setattr("src.prices.time.sleep", lambda seconds: None)
 
-    result = fetch_prices(day, day, "SE3", cache_root=cache_root)
+    result = fetch_prices(day, day, "SE3", cache_root=cache_root, today=TEST_TODAY)
 
     assert result.fallback_days == [day]
     assert result.failed_days == []
@@ -175,7 +190,7 @@ def test_fetch_prices_confirmed_404_does_not_read_cache(monkeypatch, cache_root)
 
     monkeypatch.setattr(requests, "get", lambda url, timeout: _FakeResponse(404))
 
-    result = fetch_prices(day, day, "SE3", cache_root=cache_root)
+    result = fetch_prices(day, day, "SE3", cache_root=cache_root, today=TEST_TODAY)
 
     assert result.failed_days == []
     assert result.fallback_days == []
@@ -188,7 +203,7 @@ def test_fetch_prices_successful_fetch_writes_through_cache(monkeypatch, cache_r
 
     monkeypatch.setattr(requests, "get", lambda url, timeout: _FakeResponse(200, records))
 
-    result = fetch_prices(day, day, "SE3", cache_root=cache_root)
+    result = fetch_prices(day, day, "SE3", cache_root=cache_root, today=TEST_TODAY)
 
     assert len(result.df) == 24
     cached = read_day_cache(cache_root, "prices", "SE3", day, PRICE_COLUMNS)
@@ -202,7 +217,7 @@ def test_fetch_prices_single_day_range(monkeypatch, cache_root):
 
     monkeypatch.setattr(requests, "get", lambda url, timeout: _FakeResponse(200, records))
 
-    result = fetch_prices(day, day, "SE3", cache_root=cache_root)
+    result = fetch_prices(day, day, "SE3", cache_root=cache_root, today=TEST_TODAY)
 
     assert len(result.df) == 24
     assert result.failed_days == []
@@ -215,9 +230,109 @@ def test_fetch_prices_empty_reversed_range_returns_no_error(monkeypatch, cache_r
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    result = fetch_prices(date(2026, 1, 20), date(2026, 1, 10), "SE3", cache_root=cache_root)
+    result = fetch_prices(
+        date(2026, 1, 20), date(2026, 1, 10), "SE3",
+        cache_root=cache_root, today=TEST_TODAY,
+    )
 
     assert len(result.df) == 0
     assert result.failed_days == []
     assert result.fallback_days == []
     assert list(result.df.columns) == PRICE_COLUMNS
+
+
+# -- settled-day cache fast path (Sprint 8) ------------------------------------
+
+def _no_network(monkeypatch):
+    """Any HTTP call becomes a hard failure, so "didn't touch the API" is
+    asserted rather than inferred from a timing measurement."""
+    def fake_get(url, timeout):
+        raise AssertionError(f"the API must not be consulted for a settled day: {url}")
+    monkeypatch.setattr(requests, "get", fake_get)
+
+
+def test_settled_day_with_a_valid_snapshot_makes_no_request(monkeypatch, cache_root):
+    day = date(2026, 1, 15)
+    cached_df = _parse_day(_hourly_records(datetime(2026, 1, 14, 23, 0, tzinfo=timezone.utc), 24))
+    write_day_cache(cache_root, "prices", "SE3", day, cached_df)
+    _no_network(monkeypatch)
+
+    result = fetch_prices(day, day, "SE3", cache_root=cache_root, today=date(2026, 1, 16))
+
+    assert len(result.df) == 24
+    # a settled hit is the PRIMARY source, not a degraded one -- it must not
+    # trigger the UI's "served from the offline cache" notice
+    assert result.fallback_days == []
+    assert result.failed_days == []
+
+
+def test_today_and_tomorrow_are_never_served_from_cache(monkeypatch, cache_root):
+    """Tomorrow's prices publish mid-afternoon, so "is tomorrow published
+    yet" must always be answered live."""
+    today = date(2026, 1, 15)
+    for day in (today, today + timedelta(days=1)):
+        cached_df = _parse_day(
+            _hourly_records(datetime(2026, 1, 14, 23, 0, tzinfo=timezone.utc), 24)
+        )
+        write_day_cache(cache_root, "prices", "SE3", day, cached_df)
+
+    calls = []
+    monkeypatch.setattr(
+        requests, "get",
+        lambda url, timeout: calls.append(url) or _FakeResponse(404),
+    )
+
+    fetch_prices(today, today + timedelta(days=1), "SE3", cache_root=cache_root, today=today)
+
+    assert len(calls) == 2  # both days went to the API despite having snapshots
+
+
+def test_truncated_snapshot_falls_through_to_the_network(monkeypatch, cache_root):
+    """A half-written snapshot would otherwise be served forever, since
+    this path never consults the API to notice it is short."""
+    day = date(2026, 1, 15)
+    short = _parse_day(_hourly_records(datetime(2026, 1, 14, 23, 0, tzinfo=timezone.utc), 10))
+    write_day_cache(cache_root, "prices", "SE3", day, short)
+
+    full = _hourly_records(datetime(2026, 1, 14, 23, 0, tzinfo=timezone.utc), 24)
+    monkeypatch.setattr(requests, "get", lambda url, timeout: _FakeResponse(200, full))
+
+    result = fetch_prices(day, day, "SE3", cache_root=cache_root, today=date(2026, 1, 16))
+
+    assert len(result.df) == 24  # the network answer, not the 10-row snapshot
+
+
+def test_cache_first_output_matches_a_live_fetch(monkeypatch, cache_root):
+    """The fast path must return the same frame as the slow one.
+
+    Two deliberate loosenings, both verified to be metadata rather than
+    data:
+
+    - `atol`, not `.equals()`: the CSV round trip through the cache
+      perturbs floats by ~4e-16, so `.equals()` is False even when
+      nothing is wrong.
+    - `check_freq=False`: a freshly resampled single-day frame carries
+      `index.freq = <Hour>` while one read back from CSV carries None.
+      Irrelevant in practice -- `pd.concat` drops freq, so every
+      multi-day call (i.e. every real one) already has None on both
+      paths.
+    """
+    day = date(2026, 1, 15)
+    records = _hourly_records(datetime(2026, 1, 14, 23, 0, tzinfo=timezone.utc), 24)
+    monkeypatch.setattr(requests, "get", lambda url, timeout: _FakeResponse(200, records))
+
+    live = fetch_prices(day, day, "SE3", cache_root=cache_root, today=day).df  # writes through
+    _no_network(monkeypatch)
+    cached = fetch_prices(day, day, "SE3", cache_root=cache_root, today=day + timedelta(days=1)).df
+
+    pd.testing.assert_frame_equal(live, cached, atol=1e-12, check_freq=False)
+
+
+@pytest.mark.parametrize("day,expected", [
+    (date(2026, 3, 29), 23),   # spring forward: 02:00 does not exist
+    (date(2025, 10, 26), 25),  # fall back: 02:00 happens twice
+    (date(2026, 1, 15), 24),
+])
+def test_expected_hours_counts_dst_days_from_the_zone(day, expected):
+    # a hardcoded 24 would reject both DST days' snapshots every year
+    assert _expected_hours(day) == expected
