@@ -1,58 +1,206 @@
-# CLAUDE.md — Energy Price Dashboard
+# CLAUDE.md — Solar Advisor Dashboard (pivot of the Energy Price Dashboard)
 
-## What this project is
-Course assignment (Digital Leadership, University of Gothenburg). I (Fabian) act as a consultant helping a client set up a new data analytics department. Deliverables: (1) a Streamlit dashboard, (2) an ideation report following the Stanford design thinking model (Empathize, Define, Ideate, Prototype, Test), (3) a 3-minute pitch video.
+## This is a pivot — read this first
+This repo contains a working Streamlit prototype (**v1**, Sprints 0–4, tagged
+`v1-industrial`): an energy price dashboard for a fictional manufacturer,
+Älvdal Industri AB, that recommended when to run production units based on spot
+prices.
 
-You help build (1). The process matters as much as the product: the report is written from the sprint log, so every decision must be logged as we go.
+A business-case review (logged as a Test finding) showed two problems: the
+dashboard had no clear user, and its savings case was weak. We therefore pivoted
+to a new client and a new use case, described below.
 
-## Hard constraints (non-negotiable — set by the assignment)
-- The dashboard is built in **Python with Streamlit**. Entry point is `app.py`, run with `streamlit run app.py`.
-- No other app frameworks or front ends: no Dash, Flask, FastAPI, Django, React or custom JavaScript. A Jupyter notebook is not a deliverable.
-- All UI uses Streamlit widgets and layout. Charts are Plotly rendered via `st.plotly_chart`, or Streamlit's native charts. No custom HTML/JS components.
-- Development happens in VS Code. The finished app is deployed as a Streamlit app (Streamlit Community Cloud) from the GitHub repo.
-- If a task seems to require anything outside Python + Streamlit, stop and ask me instead of working around it.
+**This is a pivot, not a restart.** Most of v1 carries over, because the new use
+case runs on the same core data (hourly spot prices) and needs the same building
+blocks: the price pipeline, colour coding, tabs, an overlay chart, KPI cards,
+plain-language recommendations, cheapest-window search, caching, tests and
+deployment. The job is to **adapt** these and **add** solar production and
+battery logic.
 
-## Client (fictional — working assumptions, to be refined in Empathize)
-- Älvdal Industri AB, ~150 employees, manufacturer in Västra Götaland → electricity price area SE3.
-- Energy-intensive, partly flexible processes: e.g. heat treatment furnaces, compressors, batch washing and drying.
-- Assumption: electricity is bought on a spot-price-linked contract, so hourly price variation reaches the invoice.
-- Audience: production planners, controller/CFO, and floor staff new to data-driven work. Many are not data-literate, so clarity beats sophistication.
+**Principle: reuse first.** Adapt existing components before writing new ones.
+If rewriting something is cheaper than adapting it, say so and ask first.
 
-## Draft problem statement (to be revised in Define)
-How might we help Älvdal's planners and management see when electricity is cheap or expensive, and quantify what moving flexible loads to cheaper hours would save?
+All v1 SPRINTLOG entries are kept — the pivot is part of the story the report
+tells.
+
+## What the dashboard is for
+**In one sentence:** a sales tool that lets Kustsol's energy advisors show a
+customer, with real data, whether solar panels — and a battery — pay off for
+them, and which package to recommend.
+
+- **Client:** Kustsol AB (fictional), a mid-sized solar installer in the
+  Gothenburg region (price area SE3) with its own team of energy advisors.
+- **User:** the energy advisor, in the customer meeting and when writing the quote.
+- **Not the user:** the homeowner. They are the advisor's customer, looking over
+  the advisor's shoulder.
+- **Decision supported:** recommend solar only or solar + battery, and which
+  battery size, backed by numbers the advisor can stand behind.
+- **Why now:** the tax reduction for sold micro-production (60 öre/kWh) was
+  abolished on 1 January 2026. Selling surplus now earns roughly the spot price,
+  while every kWh used on site avoids spot price + energy tax + grid fee + VAT.
+  The old pitch, "sell your surplus", no longer works. Self-consumption — and
+  therefore batteries — now decides profitability.
+
+**How an advisor uses it in a meeting:**
+1. Enters the customer's annual consumption, system size, roof orientation and
+   battery size.
+2. Opens "Customer calculation": the last 12 months, hour by hour — when the sun
+   produced vs. when electricity was expensive, where the solar power went, and
+   the yearly value in SEK for each scenario.
+3. Adjusts the battery size live with the customer and lands on a recommendation.
+4. Opens "Tomorrow" to make the battery concrete: "this is how your battery
+   would run tomorrow".
+
+**What it is NOT:** a homeowner app for steering their own battery (possible
+future project — mention only), or a price forecasting tool.
+
+## Problem statement
+How might we help Kustsol's energy advisors give every customer a credible,
+data-based answer to "Is solar, and a battery, worth it for me now that the
+60-öre tax reduction is gone?"
 
 Questions the dashboard must answer:
-1. How does the spot price vary by hour, weekday and season in SE3?
-2. Which hours are consistently cheapest and most expensive?
-3. What would a given flexible load cost at the cheapest hours vs. our normal schedule, per run and per year?
-4. How does outdoor temperature relate to price peaks?
-5. How does SE3 compare with the other price areas?
+1. How much would this customer's system have produced, hour by hour, over the
+   last 12 months?
+2. How well does solar production line up with the expensive hours?
+3. Where does the solar power go: own use, battery, or sold?
+4. What is the yearly value in SEK for: no solar / solar only / solar + battery?
+5. How does roof orientation (south vs. east–west) change that value?
 
-## Data sources
+## What the data is used for
+| Data | Source | Used for | Where it shows up |
+|---|---|---|---|
+| Hourly spot prices, SE3 | elprisetjustnu — `src/prices.py` | The value of every kWh: what bought power costs and what sold power earns | Colour-coded price bars, all SEK calculations, tomorrow's plan |
+| Hourly solar irradiance on a tilted panel, Gothenburg | Open-Meteo (historical + forecast) — `src/solar.py` | Estimating production each hour, for a south or east–west roof | Production line overlaid on prices, donut, scenarios, tomorrow's plan |
+| Household consumption per hour | **Assumption** (no open data): annual kWh × a typical villa profile — `src/consumption.py` | How much solar power the household can use itself each hour | Self-consumption share, donut, scenarios |
+| Taxes, grid fee, grid benefit (nätnytta), battery parameters | Constants in `src/config.py` — **TODO: Fabian verifies the values** | Turning spot prices into real buy/sell prices, defining battery behaviour | Assumptions expander, all SEK calculations |
 
-### Spot prices — Elpriset just nu
-- `GET https://www.elprisetjustnu.se/api/v1/prices/{YYYY}/{MM}-{DD}_{AREA}.json`, AREA in SE1–SE4. One static JSON file per day and area. No API key.
-- Since the day-ahead market moved to 15-minute resolution (autumn 2025), a day may contain 24 or 96 intervals. Detect this and aggregate to hourly mean for all views.
-- Verify in Sprint 0: field names, timezone handling, earliest available date, behaviour for missing days.
-- These are spot prices only: excluding VAT, energy tax, grid fees and supplier margin. The UI must say so.
-- Attribution required in the app footer: "Elpriser tillhandahålls av Elpriset just nu.se" with a link to https://www.elprisetjustnu.se.
+**The insight the data must make visible:** in summer, solar production peaks
+midday, when prices are often at their lowest, while prices peak in the morning
+and evening. The battery bridges that gap. Every chart should help the advisor
+show this.
 
-### Temperature — SMHI Open Data (meteorological observations)
-- Base: `https://opendata-download-metobs.smhi.se/api/`
-- Use a Gothenburg station. Find its id via the station list endpoint and verify it has data for the full period.
-- Verify in Sprint 0: which period endpoints cover the date range (archive vs. latest months), the data format, and whether to use hourly or daily mean air temperature.
+Data notes:
+- **Spot prices:** area fixed to SE3, shown as a label.
+- **Open-Meteo:** Gothenburg (57.71, 11.97), `global_tilted_irradiance` with
+  `tilt` and `azimuth`. Verified in Sprint 5: the same parameter names work on
+  both the archive and forecast endpoints. **Azimuth convention: −90 = East,
+  0 = South, +90 = West.** Always request `timezone=UTC` and convert locally —
+  asking for `timezone=Europe/Stockholm` returns wall-clock hours that don't
+  exist on DST days. Footer attribution: "Weather data by Open-Meteo.com". The
+  free tier is non-commercial; note this in the README.
+- **Consumption profile:** daily shape with morning and evening peaks × monthly
+  factors (higher in winter), documented as an assumption.
 
-## Tech stack
-Python 3.11+ and Streamlit (required). Supporting Python libraries: pandas, plotly, requests, pytest. Nothing else without asking me first.
+## v1 → v2 inventory
+Corrected in Sprint 5 against the actual code (four rows in the original table
+were wrong; see the Sprint 5 SPRINTLOG entry).
+
+| v1 component | Action | In v2 |
+|---|---|---|
+| `src/prices.py`, `src/cache.py` (caching + snapshot fallback) | Keep | Unchanged; area fixed to SE3 |
+| Colour coding, KPI stats, aggregation (`src/transform.py`) | Keep / Adapt | Same colour logic; heatmap becomes hour × month |
+| Two tabs | Adapt | Renamed "Customer calculation" (first) and "Tomorrow" |
+| Temperature overlay (`src/weather.py`) | Replaced | Now a solar production line; `weather.py` → `solar.py` (done, Sprint 5) |
+| Date range selector | Keep | Defaults to a summer week |
+| Cheapest-window search (`src/calc.py`) | Keep | Reused for battery grid charging |
+| "Start X at HH:MM" recommendations | Adapt | Same plain-language pattern for the battery plan |
+| Production units table + load-shift planner (rest of `calc.py`) | Replace | Customer inputs: consumption, kWp, orientation, battery size |
+| Peak power metric | Removed | Done, Sprint 5 |
+| Price area dropdown + area comparison | Removed | Done, Sprint 5 — SE3 fixed |
+| Tests, SPRINTLOG, deployment setup | Keep | Extended. **Note: v1 was never actually deployed** — no git remote exists yet; Sprint 8 owns it |
+
+## Hard constraints (non-negotiable — set by the assignment)
+- The dashboard is built in **Python with Streamlit**. Entry point is `app.py`,
+  run with `streamlit run app.py`.
+- No other app frameworks or front ends: no Dash, Flask, FastAPI, Django, React
+  or custom JavaScript. A Jupyter notebook is not a deliverable.
+- All UI uses Streamlit widgets and layout. Charts are Plotly via
+  `st.plotly_chart`, or Streamlit's native charts. No custom HTML/JS components.
+- Development happens in VS Code. The finished app is deployed on Streamlit
+  Community Cloud from the GitHub repo.
+- If a task seems to require anything outside Python + Streamlit, stop and ask.
+
+## Calculation model — simple and explainable
+An advisor must be able to explain every rule to a customer. No optimisation
+solvers.
+
+- **Production per hour (kWh)** = kWp × tilted irradiance (W/m²) ÷ 1000 × 0.85.
+  The loss factor is an assumption shown in the UI. An east–west roof is half the
+  array each way, i.e. the mean of the −90° and +90° irradiance series.
+- **Prices:** buy price per kWh = (spot + energy tax + grid fee) × (1 + VAT).
+  Sell price per kWh = spot + grid benefit (nätnytta), no VAT. All constants in
+  `src/config.py`. The **fixed** annual grid charge is deliberately excluded: it
+  doesn't change with solar or a battery, so it cancels out of every scenario
+  difference.
+- **Hourly battery rules, applied in this order:**
+  1. Solar covers the household's own consumption first.
+  2. Surplus charges the battery until full; any remaining surplus is sold.
+     Never sell at a negative price — i.e. when the *sell* price is below zero,
+     the surplus is curtailed instead.
+  3. When consumption exceeds solar, the battery covers it during hours priced
+     above that day's median; otherwise buy from the grid.
+  4. Grid charging: if the day's most expensive hours are enough more expensive
+     than the cheapest hours to beat the round-trip loss **plus a margin in
+     SEK/kWh**, charge the battery in the cheapest hours (reuse the
+     cheapest-window search). Compare **buy** prices, not spot — you pay tax,
+     grid fee and VAT on the energy the round trip throws away.
+- **Battery assumptions:** round-trip efficiency 0.9, booked entirely on
+  discharge ("10 kWh in, 9 kWh out"); max charge/discharge power = capacity ÷ 2
+  per hour. Both in `src/config.py`.
+- **Energy balance (mandatory, tested):** for every hour,
+  `production = own use + to battery + sold + curtailed` and
+  `consumption = from solar + from battery + bought for the house`.
+  The fourth production term exists because surplus at a negative sell price is
+  neither used, stored nor sold. Grid-charge energy is tracked separately from
+  household purchases, or the consumption identity breaks.
+- **Scenarios:** no solar (all consumption bought), solar only (battery = 0),
+  solar + battery. Yearly cost for each; value = the difference.
+- **Optional payback:** simple payback time = battery price ÷ yearly battery
+  value. The model deliberately excludes the green-technology deduction,
+  capacity/effekt-tariff savings and frequency-regulation income — the three
+  places Swedish home-battery economics actually lives. **These exclusions must
+  be stated in the UI**, because they are why the honest payback figure looks
+  long.
+
+## Dashboard
+**Inputs (top of page):** annual consumption (kWh), system size (kWp slider),
+roof orientation (South / East–West), battery size (kWh slider, including 0),
+optional battery price (SEK).
+
+**Tab 1 — "Customer calculation"** (adapted from History; the sales tool):
+- KPI cards: yearly value of solar only, of solar + battery, self-consumption
+  share, optional payback time.
+- Overlay chart: colour-coded hourly price bars with solar production shown in a
+  **second panel sharing the same time axis** — not a second y-axis. Dual-axis
+  is a known chart-reading trap, and the shared time axis is the whole point:
+  the pitch is *when* production happens versus *when* power is expensive.
+- Donut: where the solar power goes (own use / battery / sold / curtailed).
+- Scenario comparison: yearly cost in SEK for the three scenarios.
+- Heatmap: average price, hour of day × month.
+
+**Tab 2 — "Tomorrow"** (adapted from Plan ahead):
+- Tomorrow's colour-coded prices with forecast production overlaid.
+- Battery plan in plain language, e.g. "Charge from the grid 02–05, store solar
+  11–14, use the battery 17–20".
+- If tomorrow's prices are not yet published (before ~13:00), show a clear message.
+
+**General:** all money in SEK (never öre for totals), plain-language labels, one
+sentence under each chart saying what to look for, assumptions in an expander,
+data attributions in the footer.
 
 ## Project structure
 ```
 app.py                 # Streamlit entry point: layout, widgets, charts only
-src/prices.py          # fetch + parse spot prices
-src/weather.py         # fetch + parse SMHI data
-src/transform.py       # resampling, aggregation, heatmap tables, price colour categorization
-src/calc.py            # production planner: cheapest-window search, totals, peak power
-data/cache/            # CSV/parquet snapshots, committed as offline fallback
+src/prices.py          # spot prices (keep)
+src/cache.py           # day-granularity CSV cache + offline fallback (keep)
+src/transform.py       # colour categorisation, KPI stats, aggregation (keep)
+src/calc.py            # cheapest-window search (keep, reused for grid charging)
+src/solar.py           # irradiance fetch + production estimate
+src/consumption.py     # villa consumption profile (assumption)
+src/battery.py         # hourly battery simulation + scenarios
+src/config.py          # all constants and assumptions
+data/cache/            # snapshots, committed as offline fallback
 tests/
 SPRINTLOG.md
 README.md
@@ -60,56 +208,31 @@ requirements.txt
 ```
 
 ## Engineering rules
-- Keep logic in `src/` as pure functions (DataFrame in, DataFrame out). `app.py` only wires widgets to functions. This keeps everything testable.
-- Cache API calls with `st.cache_data` (with TTL) and persist snapshots to `data/cache/`. If an API fails, fall back to the snapshot and show a notice. Never crash.
-- Fetch day files politely: small thread pool, timeouts, retries.
-- UI language: English. Show prices in öre/kWh. Plain labels, no jargon. Every chart gets one sentence telling the user what to look for.
-- Handle edge cases: empty selection, date range with missing days, single-day range, API timeout.
-
-## Dashboard scope
-
-### Modes
-The dashboard has two modes, implemented as `st.tabs`:
-- **History** — the existing analysis views (date range, price area, temperature overlay, KPI cards, heatmap). Answers "what do prices usually look like?"
-- **Plan ahead** — today's and tomorrow's spot prices hour by hour, with a marker for the current hour. Tomorrow's prices are published by elprisetjustnu.se around 13:00; until then the API returns 404 for tomorrow, so Plan ahead shows a clear "not published yet" message instead of an empty chart or a crash. Plan ahead never shows more than today + tomorrow — this is not price forecasting (see Out of scope).
-
-Price area and temperature-overlay controls are shared across both modes; the date range selector only applies within History (Plan ahead's window is fixed to today/tomorrow by definition, so it needs no date picker).
-
-Required interactions (the assignment demands at least three):
-1. Date range selector (History mode)
-2. Price area dropdown (SE1–SE4), with an option to compare two areas
-3. Temperature overlay toggle on the price chart
-
-### Colour-coded prices
-In both modes, every hour is coloured by where its price sits within the period currently shown — relative thresholds computed from the displayed data, so the scheme works in any price area and at any price level, not a fixed öre cutoff:
-- cheapest third → green ("Cheap")
-- middle third → neutral grey ("Normal")
-- top third → orange ("Expensive")
-- top 10% → red ("Spike") — carved out of the top third, not stacked on top of it
-
-Plan ahead renders this as bars per hour (24–48 bars, reads cleanly at that density). History defaults to hourly coloured bars for ranges up to 31 days; for longer ranges it switches to one coloured bar per day (coloured by that day's mean-price category). Reasoning: a 30-ish-day span of hourly bars reads as a legible "skyline" (confirmed against the Lovable mockup), but a multi-month range can mean thousands of hourly bars, which stop being legible or fast to render — and the hour × weekday heatmap (below) is already the dedicated view for sub-day patterns over a long period, so daily bars don't lose that detail, just move it to the view built for it. Every chart using this colour scheme includes a short plain-language legend (e.g. "Green = cheap, red = price spike").
-
-Views: KPI cards (average price, cheapest and most expensive hour, daily spread), price over time (coloured per above), hour × weekday heatmap (coloured per above), production planner.
-
-### Production planner
-Replaces the single load-shift calculator originally scoped here (see SPRINTLOG.md's 2026-10-03 scope-update entry). The user adds production units in an editable table (`st.data_editor`): name, power draw (kW), run length (hours), usual start time, on/off toggle.
-
-For each active unit: energy per run = kW × hours; find the cheapest contiguous start window of that length within the priced period and show it as "Start <name> at HH:MM — est. cost X SEK". Totals across active units: total energy (kWh), total cost at usual vs. recommended start times, and the saving. Also show the combined peak power (kW) across all active units if each starts at its own recommended time, with a note that grid/capacity charges are not modelled (spot price only, per the existing VAT/tax/fees disclaimer).
-
-Price source depends on mode:
-- **Plan ahead**: actual published prices, from the current hour onward.
-- **History**: the average price per hour-of-day across the selected period, labelled "typical" savings (not a prediction).
-
-All planner logic lives in `src/calc.py` as pure functions (cheapest-window search, totals, combined peak power), with tests covering the edge cases: run length longer than the available priced hours, no active units, 0 kW / 0 hours.
-
-Out of scope: price forecasting beyond tomorrow's already-published day-ahead prices, modelling grid fees and taxes, user accounts, databases.
+- Keep logic in `src/` as pure functions (DataFrame in, DataFrame out).
+  `app.py` only wires widgets to functions.
+- Cache API calls with `st.cache_data` and persist snapshots to `data/cache/`.
+  If an API fails, fall back to the snapshot and show a notice. Never crash.
+- **Energy balance test is mandatory** — see the calculation model above. Test it
+  per hour, for all three scenarios, on fixtures that actually exercise every
+  branch.
+- Other edge cases to test: battery = 0, zero production (night/winter),
+  negative prices, missing price days.
+- Timestamps: parse as UTC, convert to Europe/Stockholm afterwards; never do day
+  arithmetic with `Timedelta(days=1)` on a local index (use `DateOffset`, or
+  group by `index.date`).
 
 ## Sprints — do not build ahead of the current sprint
-- **Sprint 0 — Spike.** Fetch one month of SE3 prices and temperature, print shapes, and show one chart in a minimal Streamlit page (`streamlit run app.py`). Answer every "verify" item above. Done when: data confirmed, or an alternative proposed.
-- **Sprint 1 — Data pipeline.** Price and weather modules, caching, fallback, one line chart in the app. Done when: any date range in any area renders.
-- **Sprint 2 — Interactions.** The three required interactions, the History/Plan ahead `st.tabs` structure, and the colour-coded price scheme (bars for Plan ahead, the chosen readable solution for History, plus the plain-language legend). Done when: both modes work, all three interactions work together without errors, Plan ahead shows the "not published yet" message correctly before tomorrow's prices are out, and colour coding renders correctly in both modes.
-- **Sprint 3 — Insight layer.** KPI cards, heatmap (recoloured to the Sprint 2 scheme), production planner, explanatory texts. Done when: a non-expert can answer the five questions above using the app, and can get a start-time recommendation and savings estimate for at least two production units.
-- **Sprint 4 — Test and ship.** pytest suite, edge cases, fixes from user tests, README, deploy to Streamlit Community Cloud. Done when: the public link works in a clean browser.
+- **Sprint 5 — Pivot setup and spike.** Tag `v1-industrial`, inventory the code,
+  remove what the pivot removes, spike Open-Meteo. *Done.*
+- **Sprint 6 — Model.** `solar.py`, `consumption.py`, `battery.py`, `config.py`,
+  with tests including the energy balance test. Done when: all three scenarios
+  return yearly SEK values and all tests pass.
+- **Sprint 7 — Adapt "Customer calculation".** Inputs, KPI cards, overlay, donut,
+  scenario comparison, heatmap, assumptions expander. Done when: an advisor can
+  answer questions 1–5 for a made-up customer.
+- **Sprint 8 — Adapt "Tomorrow", test and ship.** Battery plan in plain language,
+  polish, user test with 2–3 people acting as advisors, fixes, README, deploy.
+  Done when: the public link works in a clean browser.
 
 ## After every sprint (mandatory)
 1. Append an entry to SPRINTLOG.md using the template below.
@@ -121,6 +244,7 @@ SPRINTLOG template:
 ## Sprint N — <name> (<date>)
 Goal:
 Built:
+Reused from v1 / adapted / new:
 Decisions (and why):
 Alternatives considered and rejected (and why):
 Problems hit / how solved:
@@ -128,6 +252,8 @@ Open questions for next sprint:
 ```
 
 ## How to work with me
-- Explain key decisions in one or two sentences so I can defend them in the report and the video.
-- If you see a better approach than the one described here, propose it and wait for my go-ahead.
+- Explain key decisions in one or two sentences so I can defend them in the
+  report and the video.
+- If you see a better approach than the one described here, propose it and wait
+  for my go-ahead.
 - Ask before adding dependencies or features outside this scope.
