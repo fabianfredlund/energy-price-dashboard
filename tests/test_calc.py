@@ -5,10 +5,14 @@ asks for a window inside a single calendar day, and a spring-forward day
 has only 23 hours, so "window longer than the series" is a real input,
 not a hypothetical.
 
-Sprint 7 removed the v1 planner's tests along with the planner itself.
+Sprint 7 removed the v1 planner's tests along with the planner itself;
+Sprint 8 removed `window_cost`, whose job is now done by
+tests/test_plan.py's money-reconciliation test -- which prices steps from
+the simulation's own realised flows rather than at an assumed constant
+power.
 """
 
-from src.calc import cheapest_window, window_cost
+from src.calc import cheapest_window
 
 # -- cheapest_window -----------------------------------------------------------
 
@@ -53,28 +57,3 @@ def test_cheapest_window_full_length_wrap_is_rotation_invariant():
     prices = [3, 1, 4, 1, 5]
     result = cheapest_window(prices, hours=len(prices), wrap=True)
     assert result.total_price == sum(prices)
-
-
-# -- window_cost -----------------------------------------------------------------
-
-def test_window_cost_basic():
-    prices = [10, 20, 30]
-    assert window_cost(prices, start=1, hours=2, power_kw=2.0, wrap=False) == 2.0 * (20 + 30)
-
-
-def test_window_cost_wrap():
-    prices = [10, 20, 30]
-    # start=2, hours=2, wrap -> positions 2, 0 -> 30 + 10
-    assert window_cost(prices, start=2, hours=2, power_kw=1.0, wrap=True) == 40
-
-
-def test_window_cost_does_not_fit_past_end_returns_none():
-    assert window_cost([1, 2, 3], start=2, hours=2, power_kw=1.0, wrap=False) is None
-
-
-def test_window_cost_start_out_of_range_returns_none():
-    assert window_cost([1, 2, 3], start=5, hours=1, power_kw=1.0, wrap=False) is None
-
-
-def test_window_cost_zero_hours_returns_none():
-    assert window_cost([1, 2, 3], start=0, hours=0, power_kw=1.0, wrap=False) is None

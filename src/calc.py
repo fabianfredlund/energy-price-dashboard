@@ -3,9 +3,11 @@
 The one piece of v1's calculator that survived the pivot. It now has a
 single production consumer: `src/battery.py`'s rule 4, which uses it to
 pick the cheapest contiguous hours of a day to charge the battery from
-the grid. v1's load-shift planner (`plan_unit`, `planner_totals`,
-`yearly_saving_estimate` and friends) was removed in Sprint 7 together
-with the production-units table it served.
+the grid. v1's load-shift planner was removed in Sprint 7 with the
+production-units table it served, and `window_cost` in Sprint 8 -- it
+priced a window at *constant* power, which is what rule 4 plans but not
+what `simulate` realises, so any SEK figure from it would have
+contradicted the Tomorrow tab's own totals.
 
 Pure functions only, no Streamlit, no real "now"/calendar awareness --
 every position here is a plain integer offset into whatever price series
@@ -24,10 +26,13 @@ class CheapestWindow(NamedTuple):
 
 def cheapest_window(prices: Sequence[float], hours: int, wrap: bool = False) -> CheapestWindow | None:
     """Contiguous run of `hours` positions in `prices` with the lowest
-    sum. Cost = power_kw * sum(prices in window) and power_kw is a
-    constant multiplier over the whole window, so it can never change
-    which window is cheapest -- deliberately no power_kw argument; the
-    caller multiplies afterwards (see window_cost).
+    sum.
+
+    Returns the position and the summed price, never a cost: how much
+    energy actually moves in those hours is the caller's business, and in
+    rule 4's case it is capped hour by hour by the battery's remaining
+    room. Multiplying by an assumed constant power here is exactly the
+    mistake the deleted `window_cost` made.
 
     wrap=False (what battery.py's rule 4 passes: one calendar day's
     hours): a window that doesn't fit (hours > len(prices)) returns
@@ -59,36 +64,3 @@ def cheapest_window(prices: Sequence[float], hours: int, wrap: bool = False) -> 
         if total < best_total:
             best_start, best_total = start, total
     return CheapestWindow(best_start, best_total)
-
-
-def window_cost(
-    prices: Sequence[float], start: int, hours: int, power_kw: float, wrap: bool = False
-) -> float | None:
-    """Cost of running `hours` at `power_kw` starting at position
-    `start` in `prices` -- the same window shape cheapest_window
-    searches over, but for an arbitrary caller-supplied start, so a
-    chosen window can be priced without re-searching.
-
-    **Currently exercised only by tests.** Its v1 caller was removed in
-    Sprint 7 along with the planner. It is kept rather than deleted
-    because Sprint 8's plain-language battery plan ("charge from the grid
-    02-05") needs to put a SEK figure on exactly this window shape.
-    Sprint 8 either uses it or deletes it -- it must not sit here dead
-    for a third sprint.
-
-    None if the window doesn't fit: start out of [0, len(prices)) range,
-    hours <= 0, empty prices, hours > len(prices), or (wrap=False only)
-    start + hours runs past the end. Same does-not-fit contract as
-    cheapest_window so callers handle both uniformly.
-    """
-    n = len(prices)
-    if hours <= 0 or n == 0 or hours > n or start < 0 or start >= n:
-        return None
-    if wrap:
-        total = sum(prices[(start + i) % n] for i in range(hours))
-    else:
-        if start + hours > n:
-            return None
-        total = sum(prices[start : start + hours])
-    return power_kw * total
-
