@@ -199,6 +199,9 @@ src/calc.py            # cheapest-window search (keep, reused for grid charging)
 src/solar.py           # irradiance fetch + production estimate
 src/consumption.py     # villa consumption profile (assumption)
 src/battery.py         # hourly battery simulation + scenarios
+src/plan.py            # tomorrow's plan in plain language (added Sprint 8:
+                       # presentation logic, kept out of battery.py so
+                       # user-test wording changes never touch tested physics)
 src/config.py          # all constants and assumptions
 data/cache/            # snapshots, committed as offline fallback
 tests/
