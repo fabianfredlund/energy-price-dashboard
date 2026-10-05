@@ -99,31 +99,59 @@ def price_kpis(df: pd.DataFrame, price_col: str) -> PriceKPIs | None:
     )
 
 
-def hourly_weekday_means(df: pd.DataFrame, price_col: str) -> pd.DataFrame:
-    """Long-form mean price per (weekday, hour) across the period -- up
-    to 7*24=168 rows, one per weekday x hour-of-day combination actually
-    present (fewer for a short range). weekday: 0=Monday..6=Sunday
-    (pandas' own dayofweek convention). Feed straight into
-    categorize_by_price(result, price_col) unmodified -- the up-to-168
+def hourly_month_means(df: pd.DataFrame, price_col: str) -> pd.DataFrame:
+    """Long-form mean price per (month, hour) across the period -- up to
+    12*24=288 rows, one per month x hour-of-day combination actually
+    present (fewer for a short range). month: 1=January..12=December
+    (pandas' own .month convention). Feed straight into
+    categorize_by_price(result, price_col) unmodified -- the up-to-288
     cells become the population for its relative quantiles.
 
-    Gotcha: grouping by df.index.dayofweek/df.index.hour directly and
+    Month x hour replaced v1's weekday x hour in the pivot: the sales
+    story is seasonal, not weekly. What the advisor needs to show is that
+    the expensive cells cluster on winter mornings and evenings while
+    solar production peaks at summer midday -- a weekday axis averages
+    that contrast away, because January and July land in the same cell.
+
+    Gotcha: grouping by df.index.month/df.index.hour directly and
     calling reset_index() produces unnamed level_0/level_1 columns --
     the Index objects must be .rename()d first.
     """
     if df.empty:
-        return pd.DataFrame(columns=["weekday", "hour", price_col])
-    weekday = df.index.dayofweek.rename("weekday")
+        return pd.DataFrame(columns=["month", "hour", price_col])
+    month = df.index.month.rename("month")
     hour = df.index.hour.rename("hour")
-    return df.groupby([weekday, hour])[price_col].mean().reset_index()
+    return df.groupby([month, hour])[price_col].mean().reset_index()
 
 
-def typical_hour_of_day(df: pd.DataFrame, price_col: str) -> pd.Series:
-    """Mean price per hour-of-day (0-23) across the period -- the
-    cyclical 'typical day' profile used as History mode's planner price
-    source (labelled 'typical', not a prediction). Index: hour (0-23),
-    sorted ascending.
+# The four destinations of every produced kWh, in descending order of
+# value to the customer: avoided buy price, avoided buy price later,
+# earned roughly spot, earned nothing. Matches the production side of
+# battery.py's energy-balance invariant.
+PRODUCTION_SPLIT_LABELS = {
+    "own_use_kwh": "Own use",
+    "to_battery_kwh": "To battery",
+    "sold_kwh": "Sold",
+    "curtailed_kwh": "Curtailed",
+}
+
+
+def production_split(detail: pd.DataFrame) -> pd.Series:
+    """Yearly kWh per destination, for the "where does the solar power
+    go" donut. Index: the plain-language labels, in value order.
+
+    By battery.py's per-hour invariant
+    (`production = own_use + to_battery + sold + curtailed`) these four
+    sum to total production, so the donut is a true part-to-whole and the
+    caller can label its centre with the total rather than recomputing
+    it. Empty frame -> four zeros, so the caller branches on the total
+    rather than on a missing index.
     """
-    if df.empty:
-        return pd.Series(dtype="float64", name=price_col)
-    return df.groupby(df.index.hour)[price_col].mean().rename(price_col).sort_index()
+    if detail.empty:
+        return pd.Series(
+            {label: 0.0 for label in PRODUCTION_SPLIT_LABELS.values()}, dtype="float64"
+        )
+    return pd.Series(
+        {label: float(detail[col].sum()) for col, label in PRODUCTION_SPLIT_LABELS.items()},
+        dtype="float64",
+    )

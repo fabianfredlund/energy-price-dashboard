@@ -31,14 +31,15 @@ from src.solar import (
 from src.transform import (
     CATEGORY_ORDER,
     categorize_by_price,
-    hourly_weekday_means,
+    hourly_month_means,
     price_kpis,
     resample_daily_mean,
 )
 
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
 HOURLY_BAR_MAX_DAYS = 31
-WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 # A summer week, so the point of the whole pivot is visible on first load:
 # production peaks at midday, prices peak morning and evening.
@@ -183,19 +184,19 @@ def _render_kpi_cards(prices_df, price_col):
 
 
 def _render_heatmap(prices_df, price_col):
-    long_form = hourly_weekday_means(prices_df, price_col)
+    long_form = hourly_month_means(prices_df, price_col)
     if long_form.empty:
-        st.info("Not enough data to build the hour × weekday heatmap for this range.")
+        st.info("Not enough data to build the hour × month heatmap for this range.")
         return
     coded = categorize_by_price(long_form, price_col)
     code_map = {cat: i for i, cat in enumerate(CATEGORY_ORDER)}
     coded["code"] = coded["category"].map(code_map)
 
-    price_grid = coded.pivot(index="weekday", columns="hour", values=price_col).reindex(
-        index=range(7), columns=range(24)
+    price_grid = coded.pivot(index="month", columns="hour", values=price_col).reindex(
+        index=range(1, 13), columns=range(24)
     )
-    code_grid = coded.pivot(index="weekday", columns="hour", values="code").reindex(
-        index=range(7), columns=range(24)
+    code_grid = coded.pivot(index="month", columns="hour", values="code").reindex(
+        index=range(1, 13), columns=range(24)
     )
 
     n = len(CATEGORY_ORDER)
@@ -207,7 +208,7 @@ def _render_heatmap(prices_df, price_col):
         go.Heatmap(
             z=code_grid.values,
             x=[f"{h:02d}" for h in range(24)],
-            y=WEEKDAY_LABELS,
+            y=MONTH_LABELS,
             zmin=-0.5, zmax=n - 0.5,
             colorscale=colorscale,
             customdata=price_grid.values,
@@ -219,12 +220,17 @@ def _render_heatmap(prices_df, price_col):
             xgap=2, ygap=2,
         )
     )
-    fig.update_layout(template="plotly_white", title="Average price by hour and weekday")
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(
+        template="plotly_white", title="Average price by hour of day and month"
+    )
+    # Plotly puts the first y value at the bottom, which would stand January
+    # at the foot of the chart and read as December-first.
+    fig.update_yaxes(autorange="reversed")
+    st.plotly_chart(fig, width="stretch")
     st.caption(
-        "Darker/warmer cells are the consistently pricier hour-weekday combinations across "
-        "the selected period — use this to spot a weekly pattern, not a single day's prices. "
-        + LEGEND_CAPTION
+        "Each cell is the average price for that hour in that month. Read it for the "
+        "season: the expensive cells cluster on winter mornings and evenings, which is "
+        "exactly when a roof produces least. " + LEGEND_CAPTION
     )
 
 
