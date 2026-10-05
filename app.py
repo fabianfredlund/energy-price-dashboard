@@ -15,10 +15,10 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from src.config import (
+    DEFAULT_KWP,
     DEFAULT_ORIENTATION,
     PANEL_TILT_DEG,
     PRICE_AREA,
-    SPIKE_DEFAULT_KWP,
     SYSTEM_LOSS_FACTOR,
 )
 from src.prices import fetch_prices
@@ -263,7 +263,7 @@ def _render_price_chart(prices_df, title, solar_df, span_days, now_marker=None, 
     caption = LEGEND_CAPTION
     if prod_df is not None:
         caption += (
-            f" Solar production is an estimate for a {SPIKE_DEFAULT_KWP:.0f} kWp"
+            f" Solar production is an estimate for a {DEFAULT_KWP:.0f} kWp"
             f" {DEFAULT_ORIENTATION.lower()}-facing system at {PANEL_TILT_DEG}° tilt"
             f" ({SYSTEM_LOSS_FACTOR:.0%} of theoretical, to cover inverter and other losses)."
         )
@@ -290,7 +290,7 @@ with tab_history:
                 start, end, DEFAULT_ORIENTATION
             )
             _render_fallback_notices(s_fallback, s_failed)
-            solar_df = production_kwh(irradiance, SPIKE_DEFAULT_KWP)
+            solar_df = production_kwh(irradiance, DEFAULT_KWP)
         except Exception:
             st.error("Solar data unavailable right now; showing prices only.")
 
@@ -312,7 +312,7 @@ with tab_plan:
             today, tomorrow, DEFAULT_ORIENTATION
         )
         _render_fallback_notices(s_fallback, s_failed)
-        solar_df = production_kwh(irradiance, SPIKE_DEFAULT_KWP)
+        solar_df = production_kwh(irradiance, DEFAULT_KWP)
     except Exception:
         st.error("Solar forecast unavailable right now; showing prices only.")
 

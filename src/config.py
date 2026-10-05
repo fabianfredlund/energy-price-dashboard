@@ -52,10 +52,11 @@ DEFAULT_ORIENTATION = "South"
 # TODO: Fabian verifies -- 0.85 is the figure named in CLAUDE.md.
 SYSTEM_LOSS_FACTOR = 0.85
 
-# --- Spike-only default ----------------------------------------------------
-# Sprint 7 replaces this with the advisor's kWp slider; until then the
-# overlay needs some system size to render a production line at all.
-SPIKE_DEFAULT_KWP = 10.0
+# --- Advisor input default -------------------------------------------------
+# Where the kWp slider starts. 10 kWp is a common villa system size, so the
+# first thing an advisor sees is a plausible customer rather than a stub.
+# TODO: Fabian verifies against Kustsol's actual typical installation.
+DEFAULT_KWP = 10.0
 
 # --- Buy and sell price components (SEK per kWh) ---------------------------
 # buy  = (spot + energy tax + grid fee) * (1 + VAT)
