@@ -715,3 +715,133 @@ operational, not engineering: Fabian creates the GitHub repo and shares
 the URL for the push; he then connects Streamlit Community Cloud himself
 per the README's Deploy section and shares the resulting public URL for
 a final clean-browser check.
+
+---
+
+# v2 — Solar Advisor (pivot)
+
+A business-case review found v1 had no clear user and a weak savings
+case. The product pivots to a sales tool for Kustsol AB's energy
+advisors: showing a homeowner, with real data, whether solar — and a
+battery — pays off now that the 60 öre/kWh tax reduction for sold
+micro-production is gone (abolished 2026-01-01). Same core data (hourly
+SE3 spot prices), same building blocks, new use case. **v1 is preserved
+at the `v1-industrial` tag and all v1 entries above are kept — the pivot
+is part of the story.**
+
+## Sprint 5 — Pivot setup and spike (2026-10-05)
+
+### Goal
+Tag v1, inventory the real code against CLAUDE.md's keep/adapt/replace/
+remove table and correct it, remove everything marked Remove, and spike
+Open-Meteo. Done when the existing overlay shows a summer week of SE3
+prices with real solar production instead of temperature.
+
+### Built
+- `src/solar.py` — Open-Meteo tilted-irradiance fetch (archive + forecast)
+  and the production estimate, replacing `src/weather.py`.
+- `src/config.py` — the constants Sprint 5 actually uses (location, tilt,
+  azimuths, loss factor), each marked for Fabian to verify.
+- `tests/test_solar.py` — 16 tests.
+- `app.py` rewired: SE3 fixed, area dropdown and comparison gone, peak
+  power metric gone, temperature panel replaced by a solar production
+  panel, default range now a summer week (2026-06-15..21).
+
+### Reused from v1 / adapted / new
+- **Reused unchanged:** `src/prices.py`, `src/cache.py` (day-granularity
+  CSV cache + fallback), `src/transform.py` (colour categorisation, KPI
+  stats, heatmap aggregation), the stacked-panel chart builder, the
+  `(df, failed_days, fallback_days)` result shape and its `st.info`/
+  `st.warning` notices, the `cheapest_window`/`window_cost` search, the
+  tab structure, the date-range picker, the test fixtures and conftest.
+- **Adapted:** the overlay's second panel (temperature line → production
+  area); the chart caption; the page title; the default date range.
+- **New:** `solar.py`, `config.py`, `test_solar.py`.
+- **Removed:** `weather.py`, `test_weather.py`, SMHI cache snapshots,
+  `combined_peak_power` + its tests, the SE1 cache (only existed to demo
+  area comparison), the area dropdown and comparison UI.
+
+### Decisions (and why)
+1. **Four corrections to CLAUDE.md's inventory table**, found by reading
+   the actual code rather than trusting the table:
+   - *"Earliest start / finish-by constraints"* — **never existed in v1**;
+     nothing to remove. The only "earliest" in the codebase is a
+     tie-breaking docstring. The peak power metric in the same row did
+     exist and was removed.
+   - *`src/cache.py` and `src/transform.py` are missing from the new
+     project structure*, yet the rows that depend on them (caching,
+     colour coding, KPI cards, heatmap) are all marked Keep/Adapt. Both
+     must stay; the structure list is incomplete, not the rows.
+   - *`src/calc.py` marked "Keep" wholesale* — it actually holds three
+     different things (the keep-worthy window search, v1's load-shift
+     planner which is Replace, and peak power which is Remove), so it
+     needs selective treatment across sprints, not one verdict.
+   - *"Deployment setup — Keep"* — deployment never actually happened.
+     Sprint 4 ended waiting for a GitHub repo URL and there is still no
+     git remote. Sprint 8 still owns the real deploy.
+2. **Request Open-Meteo in UTC and convert to Europe/Stockholm here**,
+   rather than asking the API for local time. Verified live: asking for
+   `timezone=Europe/Stockholm` returns 24 hours for 2026-03-29 including
+   a literal `02:00` — an hour Stockholm skips entirely at the
+   spring-forward transition. Localising that raises
+   `NonExistentTimeError`. Parsing UTC and converting afterwards is the
+   same rule `prices.py` has followed since Sprint 0 and makes the 23-
+   and 25-hour days come out right for free. Because a UTC day is not a
+   Stockholm day, requests are padded a day either side and sliced back.
+3. **The cache stores irradiance, not production**, keyed by orientation
+   *and* tilt. Irradiance is independent of system size, so Sprint 7's
+   kWp slider can move without refetching anything; and a south-facing
+   snapshot can never be served for an east–west roof.
+4. **Keep the stacked-panel overlay, not the second y-axis** the new
+   CLAUDE.md wording implies (your call when I flagged it). It preserves
+   the Sprint 2 decision and the dataviz rule, and it is genuinely the
+   better chart here: the pitch is *when* production happens versus
+   *when* power is expensive, which is read off the shared time axis.
+5. **Panel tilt is a fixed documented constant (40°), not a sixth input**
+   (your call) — keeps the advisor's input set exactly as specified.
+6. **East–west is modelled as the mean of the −90° and +90° irradiance
+   series** against the full kWp, i.e. half the array facing each way.
+
+### Alternatives considered and rejected (and why)
+- *Deleting `src/transform.py` to match the new project structure* —
+  rejected; it would delete the colour coding and KPI stats that the
+  table explicitly keeps. The structure list was simply incomplete.
+- *Leaving `weather.py` dormant instead of deleting it* — rejected;
+  "Replace" is unambiguous and `v1-industrial` makes it recoverable.
+  Keeping a dead 266-line module around to feel safe is what tags are for.
+- *Adding the orientation dropdown and kWp slider now* so the spike could
+  demo east–west in the UI — rejected as building ahead into Sprint 7.
+  East–west is proven instead by unit tests plus a live side-by-side
+  check (below), which satisfies the spike without pre-empting Sprint 7.
+
+### Problems hit / how solved
+- The DST trap in decision 2 would have been a live crash on two days a
+  year. Found by probing the API with a known spring-forward date
+  *before* writing the parser, rather than discovering it in March.
+  Locked in with a regression test.
+- **Verifying east–west by physics, not by HTTP status.** A 200 response
+  proves nothing about whether the azimuths are handled correctly, so I
+  compared both orientations over the same live summer week: south peaks
+  at 7.26 kWh with 0.28 kWh at 06:00; east–west peaks 29% lower at 5.14
+  kWh but produces 3× as much at 06:00 (0.84 kWh), with ~8% less for the
+  week. That flatter, broader, slightly-smaller curve is exactly the
+  east–west signature, so the convention and the averaging are right.
+- The committed demo cache had drifted: 68 untracked price files had
+  accumulated from clicking around the running app (including SE2/SE4
+  areas that no longer exist in v2). Cleaned, and the committed set is
+  now exactly what the default view needs — the June week's prices plus
+  that week's irradiance for both orientations.
+
+### Open questions for next sprint
+- **"Last 12 months" is ~365 HTTP calls to the price API** (one file per
+  day; the irradiance side is one call for the whole range). With the
+  disk cache and `st.cache_data` it is a one-time cost, but Sprint 6/7
+  should decide deliberately whether to pre-warm and commit a full year
+  of price snapshots or fetch on first use and accept a slow cold start.
+- The v1 planner is still on the page and, with genuinely negative
+  midday prices in the June week, now recommends windows at *negative*
+  cost. Not wrong (it is the cheapest window) but it is v1 logic in a v2
+  world — Sprint 7 replaces it with the customer-input panel anyway.
+- `config.py`'s values are placeholders pending Fabian's verification;
+  Sprint 6 adds the tax/grid/battery constants, which are the ones that
+  actually drive the SEK figures an advisor will quote.

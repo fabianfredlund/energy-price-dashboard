@@ -1,8 +1,8 @@
-"""Day-granularity CSV cache shared by src/prices.py and src/weather.py.
+"""Day-granularity CSV cache shared by src/prices.py and src/solar.py.
 
 Stores one file per (subdir, key, day), e.g.
 data/cache/prices/SE3/2026-08-15.csv or
-data/cache/weather/71420/2026-08-15.csv.
+data/cache/solar/south_t40/2026-08-15.csv.
 
 Always written/read in UTC: every row in a cached day shares one offset,
 which avoids the two real DST-transition dates (2025-10-26, 2026-03-29)

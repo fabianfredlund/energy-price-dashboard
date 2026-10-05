@@ -1,4 +1,12 @@
-# Energy Price Dashboard
+# Solar Advisor Dashboard
+
+> **This project pivoted during Sprint 5.** It was an industrial load-shifting
+> dashboard (v1, Sprints 0–4, tagged `v1-industrial`); it is becoming a sales
+> tool for a solar installer's energy advisors. Most of this README still
+> describes v1 and is rewritten in Sprint 8. `SPRINTLOG.md` has the full story,
+> including why the pivot happened.
+
+## (v1) Energy Price Dashboard
 
 A Streamlit dashboard built for a course assignment (Digital Leadership,
 University of Gothenburg). It helps a fictional client, Älvdal Industri AB
@@ -88,9 +96,16 @@ SPRINTLOG.md            # sprint-by-sprint goals, decisions, and problems hit
 
   Elpriser tillhandahålls av [Elpriset just nu.se](https://www.elprisetjustnu.se).
 
-- **Temperature**: [SMHI Open Data](https://opendata-download-metobs.smhi.se)
-  (meteorological observations), station 71420 "Göteborg A". Historical
-  readings are observed, not forecast.
+- **Solar irradiance** (v2, from Sprint 5): [Open-Meteo](https://open-meteo.com)
+  — hourly global tilted irradiance for Gothenburg, from the archive API for
+  history and the forecast API for tomorrow.
+
+  Weather data by [Open-Meteo.com](https://open-meteo.com). Note that
+  Open-Meteo's free tier is for **non-commercial use**.
+
+- ~~**Temperature**: SMHI Open Data, station 71420 "Göteborg A"~~ — removed in
+  the Sprint 5 pivot; the temperature overlay became a solar production
+  overlay. Still available in the `v1-industrial` tag.
 
 ## Deploy to Streamlit Community Cloud
 

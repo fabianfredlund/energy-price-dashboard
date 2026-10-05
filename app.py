@@ -1,5 +1,10 @@
-"""Sprint 3: KPI cards, hour x weekday heatmap, and the production planner,
-on top of Sprint 2's History/Plan ahead modes and colour-coded prices."""
+"""Sprint 5 (pivot spike): SE3 spot prices with real solar production
+overlaid, replacing v1's temperature overlay.
+
+Still carrying v1's production-units planner -- Sprint 7 replaces that
+with the advisor's customer inputs (consumption, kWp, orientation,
+battery), so this is deliberately a transitional, half-pivoted page.
+"""
 
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -9,8 +14,21 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from src.calc import combined_peak_power, plan_unit, planner_totals, yearly_saving_estimate
-from src.prices import VALID_AREAS, fetch_prices
+from src.calc import plan_unit, planner_totals, yearly_saving_estimate
+from src.config import (
+    DEFAULT_ORIENTATION,
+    PANEL_TILT_DEG,
+    PRICE_AREA,
+    SPIKE_DEFAULT_KWP,
+    SYSTEM_LOSS_FACTOR,
+)
+from src.prices import fetch_prices
+from src.solar import (
+    PRODUCTION_COLUMN,
+    fetch_irradiance,
+    fetch_irradiance_forecast,
+    production_kwh,
+)
 from src.transform import (
     CATEGORY_ORDER,
     categorize_by_price,
@@ -19,11 +37,14 @@ from src.transform import (
     resample_daily_mean,
     typical_hour_of_day,
 )
-from src.weather import fetch_temperature
 
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
 HOURLY_BAR_MAX_DAYS = 31
 WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+# A summer week, so the point of the whole pivot is visible on first load:
+# production peaks at midday, prices peak morning and evening.
+DEFAULT_RANGE = (date(2026, 6, 15), date(2026, 6, 21))
 
 # Cheap/Expensive/Spike reuse the dataviz skill's fixed status palette
 # (good/serious/critical); Normal uses the skill's own "Muted" ink, per
@@ -42,11 +63,12 @@ CATEGORY_COLORS = {
     "Expensive": "#ec835a",
     "Spike": "#d03b3b",
 }
-TEMPERATURE_COLOR = "#2a78d6"
+PRODUCTION_COLOR = "#eda100"  # solar: the dataviz palette's yellow, distinct from every price category
 LEGEND_CAPTION = "Green = cheap, grey = normal, orange = expensive, red = price spike (top 10%)."
 
-st.set_page_config(page_title="Energy Price Dashboard", layout="wide")
-st.title("Energy Price Dashboard")
+st.set_page_config(page_title="Solar Advisor", layout="wide")
+st.title("Solar Advisor")
+st.caption(f"Spot prices for {PRICE_AREA} (Gothenburg region).")
 
 
 def _now_stockholm() -> datetime:
@@ -64,8 +86,13 @@ def _cached_fetch_prices_planahead(start, end, area):
 
 
 @st.cache_data(ttl=3600)
-def _cached_fetch_temperature(start, end):
-    return fetch_temperature(start, end)
+def _cached_fetch_irradiance(start, end, orientation):
+    return fetch_irradiance(start, end, orientation)
+
+
+@st.cache_data(ttl=3600)
+def _cached_fetch_irradiance_forecast(start, end, orientation):
+    return fetch_irradiance_forecast(start, end, orientation)
 
 
 def _render_fallback_notices(fallback_days: list, failed_days: list) -> None:
@@ -81,14 +108,18 @@ def _render_fallback_notices(fallback_days: list, failed_days: list) -> None:
         )
 
 
-def _build_price_figure(price_df, price_col, temp_df=None, now_marker=None):
-    """One figure with price bars on top; when temperature is shown, a second
-    panel below sharing the same time axis (never a secondary y-axis on the
-    same panel -- the dataviz skill treats dual-axis charts as the #1 chart
-    mistake, since the visual alignment between two independent y-scales is
-    arbitrary and can look like a correlation that isn't really there)."""
-    show_temp = temp_df is not None and not temp_df.empty
-    if show_temp:
+def _build_price_figure(price_df, price_col, prod_df=None, now_marker=None):
+    """Price bars on top; when solar production is shown, a second panel
+    below sharing the same time axis.
+
+    Deliberately NOT a second y-axis on one panel: the dataviz skill
+    treats dual-axis as the #1 chart mistake, and here the shared time
+    axis is the whole point -- the advisor's pitch is *when* production
+    happens versus *when* power is expensive, which you read off the x
+    axis, not off two arbitrarily-aligned y scales.
+    """
+    show_prod = prod_df is not None and not prod_df.empty
+    if show_prod:
         fig = make_subplots(
             rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
             row_heights=[0.7, 0.3],
@@ -109,12 +140,13 @@ def _build_price_figure(price_df, price_col, temp_df=None, now_marker=None):
             row=1, col=1,
         )
 
-    if show_temp:
+    if show_prod:
         fig.add_trace(
             go.Scatter(
-                x=temp_df.index, y=temp_df["temperature_c"], name="Temperature (°C)",
-                mode="lines", line=dict(color=TEMPERATURE_COLOR, width=2),
-                hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.1f} °C<extra></extra>",
+                x=prod_df.index, y=prod_df[PRODUCTION_COLUMN], name="Solar production (kWh)",
+                mode="lines", line=dict(color=PRODUCTION_COLOR, width=2),
+                fill="tozeroy", fillcolor="rgba(237,161,0,0.15)",
+                hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.2f} kWh<extra></extra>",
             ),
             row=2, col=1,
         )
@@ -125,8 +157,8 @@ def _build_price_figure(price_df, price_col, temp_df=None, now_marker=None):
 
     fig.update_layout(template="plotly_white", bargap=0.1, showlegend=True)
     fig.update_yaxes(gridcolor="#e1e0d9", title_text="öre/kWh", row=1, col=1)
-    if show_temp:
-        fig.update_yaxes(gridcolor="#e1e0d9", title_text="°C", row=2, col=1)
+    if show_prod:
+        fig.update_yaxes(gridcolor="#e1e0d9", title_text="kWh", row=2, col=1)
     return fig
 
 
@@ -198,33 +230,39 @@ def _render_heatmap(prices_df, price_col):
     )
 
 
-def _render_price_chart(prices_df, area_label, weather_df, span_days, now_marker=None, show_insight=False):
+def _render_price_chart(prices_df, title, solar_df, span_days, now_marker=None, show_insight=False):
     prices_df = prices_df.assign(ore_per_kWh=prices_df["SEK_per_kWh"] * 100)
-    temp_df = weather_df if weather_df is not None and not weather_df.empty else None
+    prod_df = solar_df if solar_df is not None and not solar_df.empty else None
 
     if span_days > HOURLY_BAR_MAX_DAYS:
         price_rows = categorize_by_price(
             resample_daily_mean(prices_df, columns=["ore_per_kWh"]), "ore_per_kWh"
         )
-        if temp_df is not None:
-            temp_df = resample_daily_mean(temp_df, columns=["temperature_c"])
+        if prod_df is not None:
+            # a daily *sum*, not a mean: production is energy, and a day's
+            # total kWh is the number an advisor actually quotes
+            prod_df = prod_df[[PRODUCTION_COLUMN]].resample("1D").sum()
     else:
         price_rows = categorize_by_price(prices_df, "ore_per_kWh")
 
     if price_rows.empty:
-        st.info(f"No price data for {area_label} in the selected range.")
+        st.info("No price data for the selected range.")
         return
 
-    st.subheader(area_label)
+    st.subheader(title)
 
     if show_insight:
         _render_kpi_cards(prices_df, "ore_per_kWh")
 
-    fig = _build_price_figure(price_rows, "ore_per_kWh", temp_df, now_marker)
+    fig = _build_price_figure(price_rows, "ore_per_kWh", prod_df, now_marker)
     st.plotly_chart(fig, use_container_width=True)
     caption = LEGEND_CAPTION
-    if temp_df is not None:
-        caption += " Temperature is observed (not forecast), shown as a separate panel on the same timeline."
+    if prod_df is not None:
+        caption += (
+            f" Solar production is an estimate for a {SPIKE_DEFAULT_KWP:.0f} kWp"
+            f" {DEFAULT_ORIENTATION.lower()}-facing system at {PANEL_TILT_DEG}° tilt"
+            f" ({SYSTEM_LOSS_FACTOR:.0%} of theoretical, to cover inverter and other losses)."
+        )
     st.caption(caption)
 
     if show_insight:
@@ -259,25 +297,15 @@ def _render_planner(units_df, prices, position_labels, usual_pos_fn, wrap, capti
         st.write(line)
 
     totals = planner_totals(plans)
-    peak = combined_peak_power(
-        [
-            (float(row["power_kw"]), plan.recommended_start, int(row["hours"]))
-            for (_, row), plan in zip(active.iterrows(), plans)
-            if plan.recommended_start is not None
-        ],
-        len(prices),
-        wrap=wrap,
-    )
     yearly = yearly_saving_estimate(totals.total_saving)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Total energy", f"{totals.total_energy_kwh:.1f} kWh")
     c2.metric(
         "Total cost (recommended)", f"{totals.total_recommended_cost:.1f} öre",
         f"saved {totals.total_saving:.1f} öre vs usual",
     )
-    c3.metric("Combined peak power", f"{peak:.1f} kW")
-    c4.metric("Yearly saving (est.)", f"{yearly / 100:,.0f} SEK")
+    c3.metric("Yearly saving (est.)", f"{yearly / 100:,.0f} SEK")
     st.caption(
         caption + " Yearly figure assumes one run per day; not a forecast. "
         "Grid/capacity charges are not modelled — spot price only."
@@ -308,52 +336,38 @@ units_df = st.data_editor(
     },
 )
 
-col_area, col_compare, col_temp = st.columns(3)
-with col_area:
-    area = st.selectbox("Price area", sorted(VALID_AREAS), index=sorted(VALID_AREAS).index("SE3"))
-with col_compare:
-    compare_on = st.checkbox("Compare with another area")
-    compare_area = (
-        st.selectbox("Compare against", [a for a in sorted(VALID_AREAS) if a != area])
-        if compare_on
-        else None
-    )
-with col_temp:
-    show_temp = st.checkbox("Show temperature overlay")
+show_solar = st.checkbox("Show solar production", value=True)
 
 tab_history, tab_plan = st.tabs(["History", "Plan ahead"])
 
 with tab_history:
     today = _now_stockholm().date()
-    date_range = st.date_input(
-        "Date range",
-        value=(date(2026, 8, 1), date(2026, 8, 31)),
-        max_value=today,
-    )
+    date_range = st.date_input("Date range", value=DEFAULT_RANGE, max_value=today)
     if len(date_range) != 2:
         st.info("Pick an end date to see the chart.")
     else:
         start, end = sorted(date_range)
         span_days = (end - start).days + 1
 
-        weather_df = None
-        if show_temp:
+        solar_df = None
+        if show_solar:
             try:
-                weather_df, w_failed, w_fallback = _cached_fetch_temperature(start, end)
-                _render_fallback_notices(w_fallback, w_failed)
+                irradiance, s_failed, s_fallback = _cached_fetch_irradiance(
+                    start, end, DEFAULT_ORIENTATION
+                )
+                _render_fallback_notices(s_fallback, s_failed)
+                solar_df = production_kwh(irradiance, SPIKE_DEFAULT_KWP)
             except Exception:
-                st.error("Temperature data unavailable right now; showing prices only.")
+                st.error("Solar data unavailable right now; showing prices only.")
 
-        for a in [area] + ([compare_area] if compare_area else []):
-            prices_df, p_failed, p_fallback = _cached_fetch_prices_history(start, end, a)
-            _render_fallback_notices(p_fallback, p_failed)
-            _render_price_chart(prices_df, a, weather_df, span_days, show_insight=True)
+        prices_df, p_failed, p_fallback = _cached_fetch_prices_history(start, end, PRICE_AREA)
+        _render_fallback_notices(p_fallback, p_failed)
+        _render_price_chart(
+            prices_df, f"{PRICE_AREA} — prices and solar production", solar_df,
+            span_days, show_insight=True,
+        )
 
-        # Planner uses `area` only (not compare_area) -- the client's machines
-        # don't run twice against two price areas; comparison is a price-
-        # pattern exploration feature, not a parallel production schedule.
-        area_prices_df, *_ = _cached_fetch_prices_history(start, end, area)
-        hourly_ore = area_prices_df.assign(ore=area_prices_df["SEK_per_kWh"] * 100)
+        hourly_ore = prices_df.assign(ore=prices_df["SEK_per_kWh"] * 100)
         typical = typical_hour_of_day(hourly_ore, "ore")
         if typical.empty:
             st.info("Not enough data to build a typical-day profile for the planner.")
@@ -375,31 +389,34 @@ with tab_plan:
     today, tomorrow = now.date(), now.date() + timedelta(days=1)
     now_marker = pd.Timestamp(now).floor("h") + pd.Timedelta(minutes=30)
 
-    weather_df = None
-    if show_temp:
+    solar_df = None
+    if show_solar:
         try:
-            weather_df, w_failed, w_fallback = _cached_fetch_temperature(today, tomorrow)
-            _render_fallback_notices(w_fallback, w_failed)
+            irradiance, s_failed, s_fallback = _cached_fetch_irradiance_forecast(
+                today, tomorrow, DEFAULT_ORIENTATION
+            )
+            _render_fallback_notices(s_fallback, s_failed)
+            solar_df = production_kwh(irradiance, SPIKE_DEFAULT_KWP)
         except Exception:
-            st.error("Temperature data unavailable right now; showing prices only.")
+            st.error("Solar forecast unavailable right now; showing prices only.")
 
-    for a in [area] + ([compare_area] if compare_area else []):
-        prices_df, p_failed, p_fallback = _cached_fetch_prices_planahead(today, tomorrow, a)
-        _render_fallback_notices(p_fallback, p_failed)
+    prices_df, p_failed, p_fallback = _cached_fetch_prices_planahead(today, tomorrow, PRICE_AREA)
+    _render_fallback_notices(p_fallback, p_failed)
 
-        tomorrow_present = not prices_df.empty and (prices_df.index.date == tomorrow).any()
-        if not tomorrow_present:
-            if tomorrow in p_failed:
-                st.warning(f"{a}: tomorrow's prices could not be fetched and have no cached fallback.")
-            else:
-                st.info(f"{a}: tomorrow's prices aren't published yet (usually by ~13:00). Showing today only.")
+    tomorrow_present = not prices_df.empty and (prices_df.index.date == tomorrow).any()
+    if not tomorrow_present:
+        if tomorrow in p_failed:
+            st.warning("Tomorrow's prices could not be fetched and have no cached fallback.")
+        else:
+            st.info("Tomorrow's prices aren't published yet (usually by ~13:00). Showing today only.")
 
-        _render_price_chart(prices_df, a, weather_df, span_days=2, now_marker=now_marker)
+    _render_price_chart(
+        prices_df, f"{PRICE_AREA} — today and tomorrow", solar_df,
+        span_days=2, now_marker=now_marker,
+    )
 
-    # Planner uses `area` only (not compare_area) -- same reasoning as History.
     now_floor = pd.Timestamp(now).floor("h")
-    area_prices_df, *_ = _cached_fetch_prices_planahead(today, tomorrow, area)
-    remaining = area_prices_df[area_prices_df.index >= now_floor].assign(
+    remaining = prices_df[prices_df.index >= now_floor].assign(
         ore=lambda d: d["SEK_per_kWh"] * 100
     )
     if remaining.empty:
@@ -428,5 +445,6 @@ with tab_plan:
 
 st.caption(
     "Elpriser tillhandahålls av [Elpriset just nu.se](https://www.elprisetjustnu.se). "
+    "Weather data by [Open-Meteo.com](https://open-meteo.com). "
     "Spot prices only — excludes VAT, energy tax, grid fees and supplier margin."
 )

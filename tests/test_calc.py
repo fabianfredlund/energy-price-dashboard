@@ -5,7 +5,6 @@ units, 0 kW / 0 hours."""
 
 from src.calc import (
     cheapest_window,
-    combined_peak_power,
     energy_kwh,
     plan_unit,
     planner_totals,
@@ -95,36 +94,6 @@ def test_energy_kwh_zero_power():
 
 def test_energy_kwh_zero_hours():
     assert energy_kwh(power_kw=5.0, hours=0) == 0.0
-
-
-# -- combined_peak_power -----------------------------------------------------------
-
-def test_combined_peak_power_overlapping_units_sum():
-    # unit A: 10kW at [0,2), unit B: 5kW at [1,3) -> overlap at position 1 = 15kW
-    windows = [(10.0, 0, 2), (5.0, 1, 2)]
-    assert combined_peak_power(windows, timeline_length=4, wrap=False) == 15.0
-
-
-def test_combined_peak_power_non_overlapping_units_do_not_sum():
-    windows = [(10.0, 0, 2), (5.0, 2, 2)]
-    assert combined_peak_power(windows, timeline_length=4, wrap=False) == 10.0
-
-
-def test_combined_peak_power_wrap_crosses_midnight():
-    # unit runs 2 hours starting at the last position, wrapping to position 0
-    windows = [(10.0, 3, 2), (5.0, 0, 1)]
-    peak = combined_peak_power(windows, timeline_length=4, wrap=True)
-    # position 0 gets 10 (from wrapped unit) + 5 (second unit) = 15
-    assert peak == 15.0
-
-
-def test_combined_peak_power_no_active_units_returns_zero():
-    assert combined_peak_power([], timeline_length=24, wrap=False) == 0.0
-
-
-def test_combined_peak_power_zero_kw_or_zero_hours_units_are_skipped():
-    windows = [(0.0, 0, 5), (10.0, 0, 0), (7.0, 1, 2)]
-    assert combined_peak_power(windows, timeline_length=4, wrap=False) == 7.0
 
 
 # -- plan_unit -----------------------------------------------------------------

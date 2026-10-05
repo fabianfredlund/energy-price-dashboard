@@ -14,9 +14,9 @@ CATEGORY_ORDER = ["Cheap", "Normal", "Expensive", "Spike"]
 def resample_daily_mean(df: pd.DataFrame, columns: list[str] | None = None) -> pd.DataFrame:
     """Hourly tz-aware DataFrame -> one row per Europe/Stockholm calendar day.
 
-    `columns` must be passed explicitly for a frame with non-numeric columns
-    (e.g. weather_df's `quality`) -- resample().mean() raises TypeError on a
-    mixed frame, it does not silently skip the non-numeric column.
+    `columns` must be passed explicitly for a frame carrying any non-numeric
+    column -- resample().mean() raises TypeError on a mixed frame, it does
+    not silently skip the non-numeric column.
 
     A day with NO rows at all (a confirmed-404 gap) produces no output row:
     resample("1D") would otherwise insert a NaN row for it, which

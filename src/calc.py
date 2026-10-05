@@ -1,4 +1,10 @@
-"""Production planner: cheapest-window search, totals, peak power.
+"""Cheapest-window search and the v1 load-shift planner's arithmetic.
+
+The window search (cheapest_window / window_cost) carries over to v2,
+where it picks the cheapest hours to charge a battery from the grid. The
+per-unit planner functions below are v1's load-shift calculator and are
+replaced in Sprint 7 when the production-units table becomes the
+customer-input panel.
 
 Pure functions only, no Streamlit, no real "now"/calendar awareness --
 every position here is a plain integer offset into whatever price series
@@ -83,35 +89,6 @@ def energy_kwh(power_kw: float, hours: int) -> float:
     """Energy per run = power_kw * hours. 0 kW or 0 hours -> 0.0, a
     legitimate 'this unit contributes nothing' result, not an error."""
     return power_kw * hours
-
-
-def combined_peak_power(
-    unit_windows: Sequence[tuple[float, int, int]], timeline_length: int, wrap: bool = False
-) -> float:
-    """Max simultaneous kW across unit_windows = [(power_kw, start,
-    hours), ...], each unit running at its own recommended (or usual)
-    start. A plain fixed-length accumulator array, not a sweep-line --
-    unit counts and timeline lengths here are tiny (a handful of units,
-    well under a hundred timeline positions), so O(units * hours)
-    accumulation is simple and fast enough.
-
-    0.0 for no units or timeline_length <= 0 -- never max() on an empty
-    sequence. A 0 kW or 0-hour unit is skipped (contributes nothing, not
-    an error). A position outside [0, timeline_length) with wrap=False
-    is silently ignored -- shouldn't occur if the caller only passes
-    windows cheapest_window/window_cost already confirmed fit.
-    """
-    if not unit_windows or timeline_length <= 0:
-        return 0.0
-    acc = [0.0] * timeline_length
-    for power_kw, start, hours in unit_windows:
-        if power_kw <= 0 or hours <= 0:
-            continue
-        for i in range(hours):
-            pos = (start + i) % timeline_length if wrap else start + i
-            if 0 <= pos < timeline_length:
-                acc[pos] += power_kw
-    return max(acc)
 
 
 class UnitPlan(NamedTuple):

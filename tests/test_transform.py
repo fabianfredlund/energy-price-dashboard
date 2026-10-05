@@ -134,13 +134,12 @@ def test_resample_daily_mean_empty_input_returns_empty():
 
 def test_resample_daily_mean_requires_explicit_columns_for_non_numeric_frame():
     # regression test: resample().mean() on a frame including a string
-    # column (e.g. weather_df's `quality`) raises unless `columns` pins it
-    # down to the numeric column(s) only.
+    # column raises unless `columns` pins it down to the numeric one(s).
     index = pd.date_range("2026-01-01", periods=24, freq="h", tz="Europe/Stockholm")
-    df = pd.DataFrame({"temperature_c": [1.0] * 24, "quality": ["G"] * 24}, index=index)
-    result = resample_daily_mean(df, columns=["temperature_c"])  # must not raise
+    df = pd.DataFrame({"irradiance_w_m2": [1.0] * 24, "quality": ["G"] * 24}, index=index)
+    result = resample_daily_mean(df, columns=["irradiance_w_m2"])  # must not raise
     assert len(result) == 1
-    assert list(result.columns) == ["temperature_c"]
+    assert list(result.columns) == ["irradiance_w_m2"]
 
 
 # -- price_kpis ------------------------------------------------------
