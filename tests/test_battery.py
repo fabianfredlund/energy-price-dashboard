@@ -10,35 +10,38 @@ each fixture actually drives the branch it exists for. Without it, an
 edit that quietly zeroes a branch would leave the balance test green.
 """
 
+import inspect
 import math
 
 import pandas as pd
 import pytest
 
+import src.battery
 from src.battery import (
     FLOW_COLUMNS,
     GRID_CHARGE_REASONS,
     SPOT_COLUMN,
     buy_price,
     build_frame,
-    compare_scenarios,
     grid_charge_allowance,
     grid_charge_plan,
     max_power_kwh_per_hour,
-    payback_years,
     run_scenario,
     sell_price,
     simulate,
 )
 from src.calc import cheapest_window
-from src.config import (
-    BATTERY_ROUND_TRIP_EFFICIENCY,
-    ENERGY_TAX_SEK_PER_KWH,
-    GRID_BENEFIT_SEK_PER_KWH,
-    GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH,
-    GRID_FEE_SEK_PER_KWH,
-    VAT_RATE,
-)
+from src.config import Settings
+
+#: One Settings for the whole module. Tests that care about a particular
+#: assumption build their own with Settings.defaults(**overrides).
+S = Settings.defaults()
+POWER = {"max_power_fraction": S.battery_max_power_fraction}
+RULE4 = {
+    "margin": S.grid_charge_min_margin_sek_per_kwh,
+    "efficiency": S.round_trip_efficiency,
+    **POWER,
+}
 
 TZ = "Europe/Stockholm"
 
@@ -82,8 +85,10 @@ def negative_midday_day():
 
 
 def mildly_negative_day():
-    # spot below zero but above -nätnytta, so the sell price is still
-    # positive and this should SELL, not curtail
+    # spot just below zero. Under v2's sell = spot + nätnytta this still
+    # paid a positive price and so was SOLD; under sell = spot it pays a
+    # negative price and is CURTAILED. ~94% of real negative-spot hours
+    # sit in this band, so it is the opposite of a corner case.
     idx = _day_index("2026-06-21")
     return _frame(idx, _bell(24, 10.0), [0.8] * 24, [-0.03] * 24)
 
@@ -171,7 +176,7 @@ SCENARIOS = [
 @pytest.mark.parametrize("fixture_name", sorted(BALANCE_FIXTURES))
 @pytest.mark.parametrize("capacity,with_solar", SCENARIOS)
 def test_energy_balance_holds_for_every_hour(fixture_name, capacity, with_solar):
-    detail = run_scenario(BALANCE_FIXTURES[fixture_name](), capacity, with_solar=with_solar).detail
+    detail = run_scenario(BALANCE_FIXTURES[fixture_name](), capacity, with_solar=with_solar, settings=S).detail
     if detail.empty:
         return  # empty period: nothing to balance, and nothing to hide
 
@@ -197,13 +202,15 @@ def test_balance_fixtures_still_exercise_every_branch():
     """Guards the test above: an invariant holds trivially on all-zero data,
     so each fixture must still drive the branch it was written for."""
     def detail(name, capacity=10.0):
-        return run_scenario(BALANCE_FIXTURES[name](), capacity, with_solar=True).detail
+        return run_scenario(BALANCE_FIXTURES[name](), capacity, with_solar=True, settings=S).detail
 
     assert detail("peaky_spring_day")["to_battery_kwh"].sum() > 0
     assert detail("peaky_spring_day")["from_battery_kwh"].sum() > 0
     assert detail("negative_midday_day")["curtailed_kwh"].sum() > 0
-    assert detail("mildly_negative_day")["sold_kwh"].sum() > 0
-    assert detail("mildly_negative_day")["curtailed_kwh"].sum() == 0
+    # inverted in Define iteration 2 along with sell = spot; the positive-price
+    # sell branch is still covered by huge_surplus_tiny_battery below
+    assert detail("mildly_negative_day")["sold_kwh"].sum() == 0
+    assert detail("mildly_negative_day")["curtailed_kwh"].sum() > 0
     assert detail("winter_night_no_production")["bought_for_house_kwh"].sum() > 0
     assert detail("flat_price_day")["from_battery_kwh"].sum() == 0
     assert detail("huge_surplus_tiny_battery", 2.0)["sold_kwh"].sum() > 0
@@ -213,27 +220,54 @@ def test_balance_fixtures_still_exercise_every_branch():
 
 # -- prices --------------------------------------------------------------------
 
-def test_buy_price_adds_tax_and_grid_fee_then_vat():
+def test_buy_price_is_vat_on_spot_plus_the_surcharge():
     spot = pd.Series([1.0])
-    expected = (1.0 + ENERGY_TAX_SEK_PER_KWH + GRID_FEE_SEK_PER_KWH) * (1 + VAT_RATE)
-    assert buy_price(spot).iloc[0] == pytest.approx(expected)
+    expected = 1.0 * (1 + S.vat_rate) + S.surcharge_sek_per_kwh
+    assert buy_price(
+        spot, vat_rate=S.vat_rate, surcharge_sek_per_kwh=S.surcharge_sek_per_kwh
+    ).iloc[0] == pytest.approx(expected)
 
 
-def test_sell_price_adds_grid_benefit_without_vat():
-    assert sell_price(pd.Series([1.0])).iloc[0] == pytest.approx(1.0 + GRID_BENEFIT_SEK_PER_KWH)
+def test_the_new_buy_formula_matches_the_old_one_at_the_equivalent_surcharge():
+    """Pins the algebra, so the sprint log's claim is checkable.
+
+    v2 computed `(spot + tax + grid) * (1 + VAT)` with tax 0.36 and grid
+    0.27 excl. VAT. That is identical to `spot * 1.25 + 0.7875`. The
+    headline numbers moved in Define iteration 2 because the grid fee was
+    **corrected** to a sourced 23 öre incl. VAT, not because the formula
+    changed -- and this test is what makes that statement verifiable.
+    """
+    spot = pd.Series([-0.5, 0.0, 0.37, 1.2, 3.0])
+    old_form = (spot + 0.36 + 0.27) * 1.25
+    new_form = buy_price(spot, vat_rate=0.25, surcharge_sek_per_kwh=0.7875)
+    pd.testing.assert_series_equal(old_form, new_form, atol=1e-12)
+
+
+def test_sell_price_is_the_bare_spot_price():
+    """Inverted in Define iteration 2: the `nätnytta` term is gone.
+
+    It was an unsourced 5 öre placeholder from Sprint 6, removed rather
+    than guessed at again. The consequence is in the curtailment test
+    below, not here.
+    """
+    assert sell_price(pd.Series([1.0])).iloc[0] == pytest.approx(1.0)
+    assert sell_price(pd.Series([-0.03])).iloc[0] == pytest.approx(-0.03)
 
 
 def test_buying_always_costs_more_than_selling_earns():
     # the whole reason self-consumption beats exporting
     spot = pd.Series([-0.1, 0.0, 0.5, 2.0])
-    assert (buy_price(spot) > sell_price(spot)).all()
+    assert (buy_price(spot, vat_rate=S.vat_rate, surcharge_sek_per_kwh=S.surcharge_sek_per_kwh) > sell_price(spot)).all()
 
 
 # -- grid charging (rule 4) ----------------------------------------------------
 
 def _allowance(frame, capacity=10.0):
     surplus = (frame["production_kwh"] - frame["consumption_kwh"]).clip(lower=0)
-    return grid_charge_allowance(buy_price(frame[SPOT_COLUMN]), surplus, capacity)
+    return grid_charge_allowance(
+        buy_price(frame[SPOT_COLUMN], vat_rate=S.vat_rate, surcharge_sek_per_kwh=S.surcharge_sek_per_kwh),
+        surplus, capacity, **RULE4,
+    )
 
 
 def test_grid_charge_fires_when_the_evening_is_much_dearer_than_the_night():
@@ -284,8 +318,8 @@ def test_grid_charge_allowance_never_exceeds_the_free_room():
 
 
 def _allowance_reference(buy, expected_surplus, capacity_kwh,
-                         margin=GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH,
-                         efficiency=BATTERY_ROUND_TRIP_EFFICIENCY):
+                         margin=S.grid_charge_min_margin_sek_per_kwh,
+                         efficiency=S.round_trip_efficiency):
     """`grid_charge_allowance` written the obvious, slow way.
 
     This is the pre-optimisation version verbatim: it recomputes
@@ -297,7 +331,7 @@ def _allowance_reference(buy, expected_surplus, capacity_kwh,
     committed cache gains a day.
     """
     allowance = pd.Series(0.0, index=buy.index)
-    power = max_power_kwh_per_hour(capacity_kwh)
+    power = max_power_kwh_per_hour(capacity_kwh, **POWER)
     if capacity_kwh <= 0 or power <= 0 or buy.empty:
         return allowance
     for day, day_buy in buy.groupby(buy.index.date):
@@ -338,17 +372,17 @@ def test_grid_charge_allowance_matches_the_obvious_per_day_scan():
     frame = pd.concat(frames).sort_index()
     assert len(frame) == 24 + 23 + 24 + 24 + 25  # the DST days really are odd
 
-    buy = buy_price(frame[SPOT_COLUMN])
+    buy = buy_price(frame[SPOT_COLUMN], vat_rate=S.vat_rate, surcharge_sek_per_kwh=S.surcharge_sek_per_kwh)
     surplus = (frame["production_kwh"] - frame["consumption_kwh"]).clip(lower=0)
 
     for capacity in (0.5, 10.0, 30.0):
-        optimised = grid_charge_allowance(buy, surplus, capacity)
+        optimised = grid_charge_allowance(buy, surplus, capacity, **RULE4)
         reference = _allowance_reference(buy, surplus, capacity)
         pd.testing.assert_series_equal(optimised, reference)
 
     # and the fixture must actually drive the branch, or the equality above
     # is satisfied by two identical all-zero series
-    assert grid_charge_allowance(buy, surplus, 10.0).sum() > 0
+    assert grid_charge_allowance(buy, surplus, 10.0, **RULE4).sum() > 0
 
 
 def test_grid_charge_allowance_handles_a_day_absent_from_the_surplus_series():
@@ -358,22 +392,25 @@ def test_grid_charge_allowance_handles_a_day_absent_from_the_surplus_series():
     is a public function and takes the two series separately."""
     idx = _day_index("2026-11-13")
     frame = _frame(idx, 0.0, 1.0, [0.05] * 6 + [0.6] * 10 + [3.0] * 5 + [0.6] * 3)
-    buy = buy_price(frame[SPOT_COLUMN])
+    buy = buy_price(frame[SPOT_COLUMN], vat_rate=S.vat_rate, surcharge_sek_per_kwh=S.surcharge_sek_per_kwh)
     empty_surplus = pd.Series(dtype="float64", index=frame.index[:0])
 
-    allowance = grid_charge_allowance(buy, empty_surplus, 10.0)
+    allowance = grid_charge_allowance(buy, empty_surplus, 10.0, **RULE4)
     assert allowance.sum() == pytest.approx(10.0)  # the whole battery is free room
 
 
 def test_max_power_is_half_the_capacity():
-    assert max_power_kwh_per_hour(10.0) == 5.0
+    assert max_power_kwh_per_hour(10.0, **POWER) == 5.0
 
 
 # -- rule 4's reason codes -----------------------------------------------------
 
 def _decision(frame, capacity=10.0):
     surplus = (frame["production_kwh"] - frame["consumption_kwh"]).clip(lower=0)
-    return grid_charge_plan(buy_price(frame[SPOT_COLUMN]), surplus, capacity)
+    return grid_charge_plan(
+        buy_price(frame[SPOT_COLUMN], vat_rate=S.vat_rate, surcharge_sek_per_kwh=S.surcharge_sek_per_kwh),
+        surplus, capacity, **RULE4,
+    )
 
 
 def _only_reason(decision):
@@ -445,16 +482,16 @@ def test_grid_charge_plan_allowance_matches_the_wrapper_across_dst():
         spot = [0.05] * 6 + [0.6] * (len(idx) - 14) + [3.0] * 5 + [0.6] * 3
         frames.append(_frame(idx, production, 1.0, spot))
     frame = pd.concat(frames).sort_index()
-    buy = buy_price(frame[SPOT_COLUMN])
+    buy = buy_price(frame[SPOT_COLUMN], vat_rate=S.vat_rate, surcharge_sek_per_kwh=S.surcharge_sek_per_kwh)
     surplus = (frame["production_kwh"] - frame["consumption_kwh"]).clip(lower=0)
 
     for capacity in (0.0, 0.5, 10.0, 30.0):
         pd.testing.assert_series_equal(
-            grid_charge_plan(buy, surplus, capacity).allowance,
-            grid_charge_allowance(buy, surplus, capacity),
+            grid_charge_plan(buy, surplus, capacity, **RULE4).allowance,
+            grid_charge_allowance(buy, surplus, capacity, **RULE4),
         )
     # a reason for every calendar day present, never a silent gap
-    decision = grid_charge_plan(buy, surplus, 10.0)
+    decision = grid_charge_plan(buy, surplus, 10.0, **RULE4)
     assert set(decision.reasons) == set(frame.index.date)
 
 
@@ -462,7 +499,7 @@ def test_grid_charge_plan_allowance_matches_the_wrapper_across_dst():
 
 def test_zero_capacity_battery_is_a_pure_solar_only_run():
     frame = peaky_spring_day()
-    detail = simulate(frame, capacity_kwh=0.0)
+    detail = simulate(frame, capacity_kwh=0.0, settings=S)
     assert detail["to_battery_kwh"].sum() == 0
     assert detail["from_battery_kwh"].sum() == 0
     assert detail["grid_charge_kwh"].sum() == 0
@@ -471,26 +508,37 @@ def test_zero_capacity_battery_is_a_pure_solar_only_run():
 
 def test_zero_production_night_buys_everything():
     frame = winter_night_no_production()
-    detail = simulate(frame, capacity_kwh=0.0)
+    detail = simulate(frame, capacity_kwh=0.0, settings=S)
     assert detail["bought_for_house_kwh"].sum() == pytest.approx(frame["consumption_kwh"].sum())
     assert detail["sold_kwh"].sum() == 0
 
 
 def test_surplus_is_curtailed_when_the_sell_price_is_negative():
-    detail = simulate(negative_midday_day(), capacity_kwh=5.0)
+    detail = simulate(negative_midday_day(), capacity_kwh=5.0, settings=S)
     negative_hours = detail["sell_price_sek_per_kwh"] < 0
     assert negative_hours.any()
     assert detail.loc[negative_hours, "sold_kwh"].sum() == 0
     assert detail.loc[negative_hours, "curtailed_kwh"].sum() > 0
 
 
-def test_mildly_negative_spot_still_sells_because_the_sell_price_is_positive():
-    # "never sell at a negative price" means the price you receive, which
-    # is spot + nätnytta -- the two readings differ exactly in this band
-    detail = simulate(mildly_negative_day(), capacity_kwh=0.0)
-    assert (detail["sell_price_sek_per_kwh"] > 0).all()
-    assert detail["sold_kwh"].sum() > 0
-    assert detail["curtailed_kwh"].sum() == 0
+def test_mildly_negative_spot_is_now_curtailed_because_sell_equals_spot():
+    """**Inverted in Define iteration 2.** Previously this band sold.
+
+    "Never sell at a negative price" means the price you receive. With
+    `sell = spot + nätnytta` a spot of -3 öre still paid +2, so the surplus
+    was sold; with `sell = spot` it pays -3, so it is curtailed instead.
+
+    This is not a corner case. Measured over the cached year, **94% of all
+    negative-spot hours sit in the -5..0 öre band** this flipped, so
+    removing the nätnytta placeholder raised curtailment several-fold. That
+    is a real economic consequence of a modelling honesty fix, and it is
+    also the best argument for a battery -- which is why the UI keeps it
+    visible.
+    """
+    detail = simulate(mildly_negative_day(), capacity_kwh=0.0, settings=S)
+    assert (detail["sell_price_sek_per_kwh"] < 0).all()
+    assert detail["sold_kwh"].sum() == 0
+    assert detail["curtailed_kwh"].sum() > 0
 
 
 def test_missing_price_hours_are_dropped_and_reported():
@@ -504,12 +552,12 @@ def test_missing_price_hours_are_dropped_and_reported():
 
 
 def test_dst_days_keep_their_real_length():
-    assert len(simulate(spring_forward_day(), 10.0)) == 23
-    assert len(simulate(fall_back_day(), 10.0)) == 25
+    assert len(simulate(spring_forward_day(), 10.0, settings=S)) == 23
+    assert len(simulate(fall_back_day(), 10.0, settings=S)) == 25
 
 
 def test_empty_frame_returns_empty_without_raising():
-    detail = simulate(empty_period(), capacity_kwh=10.0)
+    detail = simulate(empty_period(), capacity_kwh=10.0, settings=S)
     assert detail.empty
     assert "net_cost_sek" in detail.columns
 
@@ -524,36 +572,57 @@ def _year_frame() -> pd.DataFrame:
     return _frame(idx, production, 2.3, spot)
 
 
-def test_three_scenarios_return_yearly_sek_values():
-    """Sprint 6's done-when gate."""
-    result = compare_scenarios(_year_frame(), capacity_kwh=10.0, battery_price_sek=75000.0)
-    for scenario in (result.no_solar, result.solar_only, result.solar_battery):
-        assert isinstance(scenario.cost_sek, float)
-    assert result.no_solar.cost_sek > result.solar_only.cost_sek
-    assert result.solar_only.cost_sek > result.solar_battery.cost_sek
-    assert result.solar_value_sek > 0
-    assert result.battery_value_sek > 0
-
-
 def test_no_solar_cost_equals_the_closed_form():
     """An anchor: with no solar, cost is simply consumption x buy price."""
     frame = _year_frame()
-    result = run_scenario(frame, 0.0, with_solar=False)
-    expected = (frame["consumption_kwh"] * buy_price(frame[SPOT_COLUMN])).sum()
+    result = run_scenario(frame, 0.0, with_solar=False, settings=S)
+    expected = (frame["consumption_kwh"] * buy_price(frame[SPOT_COLUMN], vat_rate=S.vat_rate, surcharge_sek_per_kwh=S.surcharge_sek_per_kwh)).sum()
     assert result.cost_sek == pytest.approx(expected)
 
 
 def test_a_battery_raises_the_self_consumption_share():
     frame = _year_frame()
-    without = run_scenario(frame, 0.0, with_solar=True).self_consumption_share
-    with_battery = run_scenario(frame, 10.0, with_solar=True).self_consumption_share
+    without = run_scenario(frame, 0.0, with_solar=True, settings=S).self_consumption_share
+    with_battery = run_scenario(frame, 10.0, with_solar=True, settings=S).self_consumption_share
     assert with_battery > without
 
 
-def test_payback_divides_price_by_yearly_value():
-    assert payback_years(75000.0, 1500.0) == pytest.approx(50.0)
+# -- the editable-assumptions contract -----------------------------------------
+#
+# The assumptions box is editable, so the characteristic failure of this design
+# is a function that reads a config constant directly and silently ignores the
+# user's edit. These two tests make the rule mechanical instead of aspirational.
+
+def test_battery_module_reads_nothing_from_config():
+    """`src/battery.py` must take every assumption as an argument.
+
+    Not style. If `buy_price` read the surcharge from `config`, editing it in
+    the UI would change nothing -- and only *partly* nothing, because the
+    surcharge also re-enters rule 4's buy-price comparison, so some numbers
+    would move and others would not. A half-wrong screen is worse than an
+    obviously broken one.
+    """
+    source = inspect.getsource(src.battery)
+    assert "src.config" not in source
+    assert "from src import config" not in source
 
 
-def test_payback_is_none_when_the_battery_saves_nothing():
-    assert payback_years(75000.0, 0.0) is None
-    assert payback_years(75000.0, -10.0) is None
+@pytest.mark.parametrize("func,param", [
+    (simulate, "settings"),
+    (run_scenario, "settings"),
+    (buy_price, "vat_rate"),
+    (buy_price, "surcharge_sek_per_kwh"),
+    (max_power_kwh_per_hour, "max_power_fraction"),
+    (grid_charge_plan, "margin"),
+    (grid_charge_plan, "efficiency"),
+    (grid_charge_allowance, "margin"),
+    (grid_charge_allowance, "efficiency"),
+])
+def test_threaded_assumptions_have_no_default(func, param):
+    """A missing value must be a TypeError at the call, not a wrong SEK figure."""
+    parameter = inspect.signature(func).parameters[param]
+    assert parameter.default is inspect.Parameter.empty, (
+        f"{func.__name__}({param}=...) has a default; a caller could forget it "
+        f"and silently get the wrong assumption"
+    )
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY

@@ -49,7 +49,6 @@ from src.config import (
     LONGITUDE,
     ORIENTATIONS,
     PANEL_TILT_DEG,
-    SYSTEM_LOSS_FACTOR,
 )
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
@@ -270,7 +269,7 @@ def fetch_irradiance_forecast(
 
 
 def production_kwh(
-    irradiance_df: pd.DataFrame, kwp: float, loss: float = SYSTEM_LOSS_FACTOR
+    irradiance_df: pd.DataFrame, kwp: float, *, loss: float
 ) -> pd.DataFrame:
     """Pure: add a `production_kwh` column from irradiance and system size.
 

@@ -37,15 +37,6 @@ from typing import NamedTuple
 import pandas as pd
 
 from src.calc import cheapest_window
-from src.config import (
-    BATTERY_MAX_POWER_FRACTION,
-    BATTERY_ROUND_TRIP_EFFICIENCY,
-    ENERGY_TAX_SEK_PER_KWH,
-    GRID_BENEFIT_SEK_PER_KWH,
-    GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH,
-    GRID_FEE_SEK_PER_KWH,
-    VAT_RATE,
-)
 from src.consumption import consumption_profile
 
 SPOT_COLUMN = "SEK_per_kWh"  # as produced by src/prices.py
@@ -62,27 +53,41 @@ FLOW_COLUMNS = [
 ]
 
 
-def buy_price(spot: pd.Series) -> pd.Series:
-    """What a kWh taken from the grid costs: (spot + tax + grid fee) x VAT."""
-    return (spot + ENERGY_TAX_SEK_PER_KWH + GRID_FEE_SEK_PER_KWH) * (1 + VAT_RATE)
+def buy_price(spot: pd.Series, *, vat_rate: float, surcharge_sek_per_kwh: float) -> pd.Series:
+    """What a kWh taken from the grid costs: spot x (1 + VAT) + surcharge.
+
+    The surcharge is energy tax + grid transfer fee, both already including
+    VAT. Algebraically identical to the older
+    `(spot + tax + grid) * (1 + VAT)` form, but one editable field is
+    explainable to a customer where two constants inside a bracket are not.
+
+    Both parameters are required and keyword-only on purpose: they are
+    user-editable, and a default here would let an edit be silently ignored.
+    """
+    return spot * (1 + vat_rate) + surcharge_sek_per_kwh
 
 
 def sell_price(spot: pd.Series) -> pd.Series:
-    """What a kWh exported earns: spot + nätnytta, no VAT (a private
-    microproducer is normally not VAT-registered for this)."""
-    return spot + GRID_BENEFIT_SEK_PER_KWH
+    """What a kWh exported earns: the bare spot price.
+
+    No VAT (a private microproducer is normally not VAT-registered for
+    this) and no grid benefit -- the `nätnytta` term was an unsourced
+    placeholder and was removed in Define iteration 2 rather than guessed
+    at again. Nothing to parameterise, so nothing to forget.
+    """
+    return spot.copy()
 
 
-def max_power_kwh_per_hour(capacity_kwh: float) -> float:
-    """Charge/discharge limit for one hour. At the default fraction of 0.5 a
-    full charge takes exactly two hours -- which is why the grid-charge
-    window below is always a two-hour window."""
-    return capacity_kwh * BATTERY_MAX_POWER_FRACTION
+def max_power_kwh_per_hour(capacity_kwh: float, *, max_power_fraction: float) -> float:
+    """Charge/discharge limit for one hour. At a fraction of 0.5 a full
+    charge takes exactly two hours -- which is why the grid-charge window
+    below is usually a two-hour window."""
+    return capacity_kwh * max_power_fraction
 
 
-#: Why rule 4 declined to grid-charge on a given day. Codes, not prose --
-#: the customer-facing wording lives in src/plan.py, so the Tomorrow tab
-#: can explain the decision without this module knowing about the UI.
+#: Why rule 4 declined to grid-charge on a given day. Codes, not prose, so
+#: this module stays free of UI wording. Rule 4 is invisible on screen now,
+#: so the assumptions box uses these to explain what the battery is doing.
 #: Measured frequency over the committed year at 10 kWh, in case the
 #: relative weight is ever surprising: solar_fills_it 182 days, charged
 #: 138, no_later_hours 40, spread_too_small 7.
@@ -105,8 +110,10 @@ def grid_charge_plan(
     buy: pd.Series,
     expected_surplus: pd.Series,
     capacity_kwh: float,
-    margin: float = GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH,
-    efficiency: float = BATTERY_ROUND_TRIP_EFFICIENCY,
+    *,
+    margin: float,
+    efficiency: float,
+    max_power_fraction: float,
 ) -> GridChargeDecision:
     """Rule 4, returning *why* it decided what it decided.
 
@@ -120,7 +127,7 @@ def grid_charge_plan(
     """
     allowance = pd.Series(0.0, index=buy.index)
     reasons: dict = {}
-    power = max_power_kwh_per_hour(capacity_kwh)
+    power = max_power_kwh_per_hour(capacity_kwh, max_power_fraction=max_power_fraction)
 
     if capacity_kwh <= 0 or power <= 0:
         return GridChargeDecision(allowance, {d: "no_battery" for d in set(buy.index.date)})
@@ -160,8 +167,10 @@ def grid_charge_allowance(
     buy: pd.Series,
     expected_surplus: pd.Series,
     capacity_kwh: float,
-    margin: float = GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH,
-    efficiency: float = BATTERY_ROUND_TRIP_EFFICIENCY,
+    *,
+    margin: float,
+    efficiency: float,
+    max_power_fraction: float,
 ) -> pd.Series:
     """Rule 4: how many kWh may be bought from the grid in each hour.
 
@@ -210,29 +219,46 @@ def grid_charge_allowance(
     three-scenario comparison.
     """
     return grid_charge_plan(
-        buy, expected_surplus, capacity_kwh, margin, efficiency
+        buy, expected_surplus, capacity_kwh, margin=margin, efficiency=efficiency,
+        max_power_fraction=max_power_fraction,
     ).allowance
 
 
 def simulate(
     frame: pd.DataFrame,
     capacity_kwh: float,
-    margin: float = GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH,
+    *,
+    settings,
     initial_soc_kwh: float = 0.0,
-    efficiency: float = BATTERY_ROUND_TRIP_EFFICIENCY,
 ) -> pd.DataFrame:
     """Run the four hourly rules over `frame` and return the full flow table.
 
     `frame` needs `production_kwh`, `consumption_kwh` and `SEK_per_kWh`
     (the spot price, exactly as src/prices.py names it).
 
+    `settings` is required and keyword-only. It is duck-typed -- anything
+    exposing `vat_rate`, `surcharge_sek_per_kwh`, `round_trip_efficiency`,
+    `battery_max_power_fraction` and `grid_charge_min_margin_sek_per_kwh`
+    will do (in practice `config.Settings`). This module deliberately
+    imports nothing from `config`: the assumptions are user-editable, and a
+    module-level default here would let an edit be silently ignored -- and
+    only *partly*, since the surcharge re-enters rule 4's buy-price
+    comparison, which is worse than being wholly ignored.
+
     capacity_kwh=0 is a legitimate "no battery" run through the same code
     path -- that is how the solar-only scenario is produced, so there is
     one simulation to reason about rather than three.
     """
+    efficiency = settings.round_trip_efficiency
+    margin = settings.grid_charge_min_margin_sek_per_kwh
+    max_power_fraction = settings.battery_max_power_fraction
+
     out = frame.copy()
     spot = out[SPOT_COLUMN]
-    buy = buy_price(spot)
+    buy = buy_price(
+        spot, vat_rate=settings.vat_rate,
+        surcharge_sek_per_kwh=settings.surcharge_sek_per_kwh,
+    )
     sell = sell_price(spot)
 
     if out.empty:
@@ -248,7 +274,8 @@ def simulate(
     median_spot = spot.groupby(spot.index.date).transform("median").to_numpy()
     expected_surplus = (out["production_kwh"] - out["consumption_kwh"]).clip(lower=0)
     charge_allow = grid_charge_allowance(
-        buy, expected_surplus, capacity_kwh, margin, efficiency
+        buy, expected_surplus, capacity_kwh, margin=margin, efficiency=efficiency,
+        max_power_fraction=max_power_fraction,
     ).to_numpy()
 
     # Iterate numpy arrays, not .at[] -- measured ~220x faster over a year.
@@ -267,7 +294,7 @@ def simulate(
     loss = [0.0] * n
     soc_trace = [0.0] * n
 
-    power = max_power_kwh_per_hour(capacity_kwh)
+    power = max_power_kwh_per_hour(capacity_kwh, max_power_fraction=max_power_fraction)
     soc = float(initial_soc_kwh)
 
     for i in range(n):
@@ -364,7 +391,9 @@ class ScenarioResult(NamedTuple):
     detail: pd.DataFrame
 
 
-def run_scenario(frame: pd.DataFrame, capacity_kwh: float, with_solar: bool) -> ScenarioResult:
+def run_scenario(
+    frame: pd.DataFrame, capacity_kwh: float, with_solar: bool, *, settings
+) -> ScenarioResult:
     """One scenario through the one simulation path."""
     name = (
         "solar_battery" if with_solar and capacity_kwh > 0
@@ -372,49 +401,9 @@ def run_scenario(frame: pd.DataFrame, capacity_kwh: float, with_solar: bool) -> 
         else "no_solar"
     )
     run_frame = frame if with_solar else frame.assign(production_kwh=0.0)
-    detail = simulate(run_frame, capacity_kwh if with_solar else 0.0)
+    detail = simulate(run_frame, capacity_kwh if with_solar else 0.0, settings=settings)
 
     produced = detail["production_kwh"].sum()
     used_on_site = detail["own_use_kwh"].sum() + detail["to_battery_kwh"].sum()
     share = float(used_on_site / produced) if produced > 0 else 0.0
     return ScenarioResult(name, float(detail["net_cost_sek"].sum()), share, detail)
-
-
-class ScenarioComparison(NamedTuple):
-    no_solar: ScenarioResult
-    solar_only: ScenarioResult
-    solar_battery: ScenarioResult
-    solar_value_sek: float  # yearly, vs doing nothing
-    battery_value_sek: float  # yearly, on top of solar
-    payback_years: float | None
-
-
-def compare_scenarios(
-    frame: pd.DataFrame, capacity_kwh: float, battery_price_sek: float | None = None
-) -> ScenarioComparison:
-    """All three scenarios plus the two differences the advisor quotes."""
-    no_solar = run_scenario(frame, 0.0, with_solar=False)
-    solar_only = run_scenario(frame, 0.0, with_solar=True)
-    solar_battery = run_scenario(frame, capacity_kwh, with_solar=True)
-
-    solar_value = no_solar.cost_sek - solar_only.cost_sek
-    battery_value = solar_only.cost_sek - solar_battery.cost_sek
-    return ScenarioComparison(
-        no_solar, solar_only, solar_battery,
-        solar_value, battery_value,
-        payback_years(battery_price_sek, battery_value) if battery_price_sek else None,
-    )
-
-
-def payback_years(battery_price_sek: float, yearly_battery_value_sek: float) -> float | None:
-    """Simple payback: price / yearly value. None when the battery saves
-    nothing (no finite payback exists) rather than returning infinity.
-
-    This deliberately excludes the green-technology deduction,
-    capacity/effekt-tariff savings and frequency-regulation income -- the
-    UI must state that, since those are where home-battery economics
-    actually lives and why this figure looks long.
-    """
-    if yearly_battery_value_sek <= 0:
-        return None
-    return battery_price_sek / yearly_battery_value_sek

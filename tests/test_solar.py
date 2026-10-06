@@ -93,18 +93,18 @@ def test_production_kwh_formula():
 
 def test_production_kwh_zero_system_size_is_all_zero_not_an_error():
     df = _irradiance_df(datetime(2026, 6, 15, 10, 0, tzinfo=timezone.utc), [1000.0, 500.0])
-    out = production_kwh(df, kwp=0.0)
+    out = production_kwh(df, kwp=0.0, loss=0.85)
     assert (out[PRODUCTION_COLUMN] == 0.0).all()
 
 
 def test_production_kwh_night_hours_produce_nothing():
     df = _irradiance_df(datetime(2026, 1, 15, 0, 0, tzinfo=timezone.utc), [0.0, 0.0])
-    out = production_kwh(df, kwp=10.0)
+    out = production_kwh(df, kwp=10.0, loss=0.85)
     assert (out[PRODUCTION_COLUMN] == 0.0).all()
 
 
 def test_production_kwh_empty_frame_keeps_the_column():
-    out = production_kwh(pd.DataFrame(columns=SOLAR_COLUMNS), kwp=10.0)
+    out = production_kwh(pd.DataFrame(columns=SOLAR_COLUMNS), kwp=10.0, loss=0.85)
     assert out.empty
     assert PRODUCTION_COLUMN in out.columns
 
