@@ -252,21 +252,47 @@ def _render_assumptions() -> Settings:
 
         st.divider()
         st.markdown("**Lifetimes**")
-        left, right = st.columns(2)
-        solar_life = int(left.number_input(
+        c1, c2, c3 = st.columns(3)
+        solar_life = int(c1.number_input(
             "Solar (years)", min_value=5, max_value=40,
             value=int(defaults.solar_lifetime_years), step=1,
             help=_provenance("solar_lifetime_years"),
         ))
-        battery_life = int(right.number_input(
+        battery_warranty = int(c2.number_input(
             "Battery warranty (years)", min_value=1, max_value=30,
             value=int(defaults.battery_lifetime_years), step=1,
             help=_provenance("battery_lifetime_years"),
         ))
+        battery_service_life = int(c3.number_input(
+            "Battery service life (years)", min_value=1, max_value=40,
+            value=int(defaults.battery_service_life_years), step=1,
+            help=_provenance("battery_service_life_years"),
+        ))
         st.caption(
-            f"The battery is judged on its **warranty**. Its expected *service life* "
-            f"is {ASSUMPTIONS['battery_service_life_years'].value:.0f}–25 years, which "
-            f"is used only to qualify a 'No', never to turn one into a 'Yes'."
+            f"**The battery verdict is judged against its service life**, not its "
+            f"warranty — a warranty is a manufacturer's defect guarantee, not a "
+            f"claim that the battery stops being useful the day it expires. "
+            f"Test finding, 2026-10-06: judging against the warranty made every "
+            f"realistically-priced battery say 'No'. When a payback relies on the "
+            f"battery outliving its warranty, the card says so."
+        )
+
+        st.divider()
+        st.markdown("**Other battery income**")
+        other_income = st.number_input(
+            "Grid support services & capacity-charge savings (SEK/year)",
+            min_value=0, max_value=20000,
+            value=int(defaults.other_battery_income_sek_per_year), step=100,
+            help=_provenance("other_battery_income_sek_per_year"),
+        )
+        st.caption(
+            "Covers frequency regulation income (stödtjänster) and capacity-charge "
+            "(effektavgift) savings from peak shaving — a real figure from an "
+            "aggregator's offer or the customer's grid tariff, added directly to "
+            "the battery's yearly saving. Defaults to 0: this tool's hourly "
+            "consumption is a modelled assumption, not the customer's real usage, "
+            "so it cannot honestly estimate a specific capacity-charge saving on "
+            "its own."
         )
 
         st.divider()
@@ -274,10 +300,11 @@ def _render_assumptions() -> Settings:
         st.markdown(
             f"- **Capacity charge (effektavgift)** — "
             f"{ASSUMPTIONS['effektavgift_sek_per_kw'].value:.0f} SEK/kW in this grid "
-            f"area, charged on the month's three highest hours. This is exactly "
-            f"where a battery earns, and it is not modelled.\n"
-            f"- **Frequency regulation income**, panel degradation, and any rise or "
-            f"fall in electricity prices.\n"
+            f"area, charged on the month's three highest hours — and **grid support "
+            f"services (stödtjänster)** are not simulated from this tool's own data. "
+            f"Enter a real figure above, under 'Other battery income', to include "
+            f"them in the payback.\n"
+            f"- Panel degradation, and any rise or fall in electricity prices.\n"
             f"- Payback here is simple payback — investment divided by yearly "
             f"saving — **not** a discounted calculation. Over 15–25 years that is "
             f"not a rounding error.\n"
@@ -291,7 +318,9 @@ def _render_assumptions() -> Settings:
         vat_rate=vat_percent / 100,
         surcharge_sek_per_kwh=surcharge_ore / 100,
         solar_lifetime_years=solar_life,
-        battery_lifetime_years=battery_life,
+        battery_lifetime_years=battery_warranty,
+        battery_service_life_years=battery_service_life,
+        other_battery_income_sek_per_year=float(other_income),
         green_tech_enabled=enabled,
         green_tech_owners=owners,
     )
@@ -332,6 +361,13 @@ def _render_answer_cards(rec, settings) -> None:
                 f"Paid back in **{_years(b.payback_years)}**, saving a further "
                 f"**{_sek(b.savings.average)}/year**."
             )
+            if not b.within_warranty:
+                st.markdown(
+                    f"**But:** that payback happens after the "
+                    f"{settings.battery_lifetime_years}-year warranty ends — it "
+                    f"relies on the battery lasting into its expected "
+                    f"{settings.battery_service_life_years}-year service life."
+                )
             st.caption(
                 f"Range {_sek(b.savings.lowest)} to {_sek(b.savings.highest)} a year. "
                 f"That payback is the battery on its own — what it adds on top of the "
@@ -347,17 +383,16 @@ def _render_answer_cards(rec, settings) -> None:
             )
             st.markdown(
                 f"### :material/cancel: Battery: **No**\n"
-                f"No size pays for itself within its "
-                f"{settings.battery_lifetime_years}-year warranty. {detail}"
+                f"No size pays for itself within its expected "
+                f"{settings.battery_service_life_years}-year service life. {detail}"
             )
-            if rec.best_on_service_life is not None:
-                life = settings.battery_service_life_years
+            if rec.extra_income_to_flip_sek is not None:
                 st.markdown(
-                    f"**But:** that is the verdict on the "
-                    f"{settings.battery_lifetime_years}-year *warranty*. On an "
-                    f"expected **{life}-year service life** it would pay off"
-                    + (" with the deduction applied." if settings.green_tech_enabled
-                       else " — and sooner with the green technology deduction.")
+                    f"**But:** it would pay off with about "
+                    f"**{_sek(rec.extra_income_to_flip_sek)}/year** more income — "
+                    f"from grid support services or peak shaving — on top of what "
+                    f"it already saves. Enter a real figure in 'Other battery "
+                    f"income' above if the customer has an offer."
                 )
             st.caption(
                 "Battery payback is what the battery adds on top of the panels, "
@@ -369,7 +404,10 @@ def _render_payback_curve(rec, settings) -> None:
     curve = payback_curve(
         rec,
         solar_lifetime_years=settings.solar_lifetime_years,
-        battery_lifetime_years=settings.battery_lifetime_years,
+        # The service life, not the warranty: that is the horizon the
+        # verdict is actually judged against, so the chart's retirement
+        # point has to agree with the card or the two would contradict.
+        battery_credit_years=settings.battery_service_life_years,
     )
     fig = go.Figure()
     colors = {"Solar only": SOLAR_COLOR}
@@ -408,7 +446,7 @@ def _render_payback_curve(rec, settings) -> None:
     fig.add_hline(y=0, line_dash="dot", line_color="#52514e")
     if rec.recommended is not None or rec.best_candidate is not None:
         fig.add_vline(
-            x=settings.battery_lifetime_years, line_dash="dot", line_color="#898781",
+            x=settings.battery_service_life_years, line_dash="dot", line_color="#898781",
             annotation_text="Battery end of life", annotation_position="top left",
         )
     fig.update_layout(
@@ -427,9 +465,10 @@ def _render_payback_curve(rec, settings) -> None:
     )
     if rec.recommended is not None or rec.best_candidate is not None:
         note += (
-            f" The battery stops earning at {settings.battery_lifetime_years} years and "
-            f"is not replaced, so from there the two lines run parallel — **the gap "
-            f"between them is what the battery was worth over its whole life**."
+            f" The battery stops earning at {settings.battery_service_life_years} years "
+            f"(its expected service life) and is not replaced, so from there the two "
+            f"lines run parallel — **the gap between them is what the battery was "
+            f"worth over its whole life**."
         )
     st.caption(note)
 
@@ -452,9 +491,12 @@ def _render_size_chart(rec, settings) -> None:
         textposition="outside", cliponaxis=False,
         hovertemplate="%{x}<br>pays back in %{y:.1f} years<extra></extra>",
     ))
+    # The service life, not the warranty: the line a bar must clear to be
+    # "worth it" has to be the same horizon recommend() actually judges
+    # pays_back against, or the chart would visually contradict the cards.
     fig.add_hline(
-        y=settings.battery_lifetime_years, line_dash="dash", line_color=LIMIT_COLOR,
-        annotation_text=f"{settings.battery_lifetime_years}-year warranty",
+        y=settings.battery_service_life_years, line_dash="dash", line_color=LIMIT_COLOR,
+        annotation_text=f"{settings.battery_service_life_years}-year service life",
         annotation_position="top left",
     )
     fig.update_layout(
@@ -468,8 +510,9 @@ def _render_size_chart(rec, settings) -> None:
 
     missing = [s.capacity_kwh for s in rec.sizes if s.payback_years is None]
     note = (
-        "A bar below the red line pays for itself inside its warranty; above it, it "
-        "does not. **0 kWh is not shown — there is nothing to pay back.**"
+        "A bar below the red line pays for itself inside its expected service "
+        "life; above it, it does not. **0 kWh is not shown — there is nothing to "
+        "pay back.**"
     )
     if missing:
         note += f" {', '.join(f'{m} kWh' for m in missing)} saves nothing at all."

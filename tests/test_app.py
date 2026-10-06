@@ -144,15 +144,39 @@ def test_a_longer_solar_lifetime_can_turn_a_no_into_a_yes():
     assert "Solar: **No**" in _headlines(at)
 
 
+def test_other_battery_income_field_exists_and_defaults_to_zero():
+    at = _run()
+    field = _input(at, "support services")
+    assert field.value == 0
+
+
+def test_entering_other_battery_income_can_flip_a_no_to_a_yes():
+    """The round-trip the No card's own suggestion promises: at the default
+    price the card names an extra-income figure that would flip the verdict
+    -- entering comfortably more than that must actually flip it."""
+    at = _run()
+    before = _headlines(at)
+    assert "Battery: **No**" in before  # the default verdict, per the Test finding
+
+    _input(at, "support services").set_value(5000.0)  # ample headroom over the ~884 needed
+    at.run()
+    assert not at.exception
+    headlines = _headlines(at)
+    assert headlines != before
+    assert "Battery: **Yes" in headlines
+
+
 # -- the battery verdict both ways ---------------------------------------------
 
-def test_a_cheap_battery_is_recommended_with_a_size():
+def test_a_cheap_battery_is_recommended_with_a_size_and_no_qualifier():
+    """Comfortably inside the warranty too, so there is nothing to disclose."""
     at = _run()
     _input(at, "Battery price").set_value(CHEAP_BATTERY_SEK)
     at.run()
     headlines = _headlines(at)
     assert "Battery: **Yes" in headlines
     assert "kWh" in headlines
+    assert "**But:**" not in headlines
 
 
 def test_an_expensive_battery_is_refused_but_still_names_the_best_candidate():
@@ -166,25 +190,30 @@ def test_an_expensive_battery_is_refused_but_still_names_the_best_candidate():
     assert "best case" in headlines.lower() or "saves enough" in headlines.lower()
 
 
-def test_the_service_life_sentence_appears_only_when_the_horizons_disagree():
-    """It must qualify a "No", never decorate every one of them."""
+def test_a_no_verdict_states_what_extra_income_would_flip_it():
+    """**Test finding, 2026-10-06:** the old sentence here only ever fired to
+    say "service life rescues this No" and was absent otherwise. Judging
+    against the service life directly retired that message; this one takes
+    its place and is normal for a 'No', not a rare qualifier -- it's the
+    concrete number for the 'what would it take' conversation."""
     at = _run()
-
-    # Far too expensive to pay back on either horizon -> no qualifier
     _input(at, "Battery price").set_value(EXPENSIVE_BATTERY_SEK)
     at.run()
-    assert "**But:**" not in _headlines(at)
+    headlines = _headlines(at)
+    assert "Battery: **No**" in headlines
+    assert "**But:**" in headlines
+    assert "SEK/year" in headlines
+    assert "Other battery income" in headlines
 
-    # Comfortably inside the warranty -> nothing to qualify
-    _input(at, "Battery price").set_value(CHEAP_BATTERY_SEK)
-    at.run()
-    assert "**But:**" not in _headlines(at)
 
-
-def test_a_near_miss_on_the_warranty_is_qualified_by_the_service_life():
+def test_a_battery_past_warranty_but_inside_service_life_is_a_yes_with_a_note():
+    """Verified live: default price + the deduction lands the best size at 12
+    years -- past the 10-year warranty, inside the 15-year service life. This
+    is the exact case a 10-year-only verdict got wrong."""
     at = _run()
-    at.checkbox[0].set_value(True)  # the deduction brings the best size near the line
+    at.checkbox[0].set_value(True)
     at.run()
     headlines = _headlines(at)
-    if "Battery: **No**" in headlines:
-        assert "**But:**" in headlines and "service life" in headlines
+    assert "Battery: **Yes" in headlines
+    assert "**But:**" in headlines
+    assert "warranty" in headlines and "service life" in headlines

@@ -187,9 +187,10 @@ def test_solar_is_no_when_payback_exceeds_its_lifetime():
     assert r.solar.payback_years == pytest.approx(100.0)
 
 
-def test_the_recommended_battery_is_the_shortest_payback_that_clears_the_warranty():
+def test_the_recommended_battery_is_the_shortest_payback_that_clears_the_service_life():
     # 5 kWh saves 2 000/yr on 35 000 -> 17.5y; 10 kWh saves 7 000 on 70 000 -> 10y;
-    # 15 kWh saves 15 000 on 105 000 -> 7y   => 15 kWh wins
+    # 15 kWh saves 15 000 on 105 000 -> 7y   => 15 kWh wins, and clears the
+    # warranty too (7 < 10), which is the stronger, lower-risk result
     costs = _costs(_three(30000.0), {
         0: _three(20000.0), 5: _three(18000.0), 10: _three(13000.0), 15: _three(5000.0),
     })
@@ -198,9 +199,10 @@ def test_the_recommended_battery_is_the_shortest_payback_that_clears_the_warrant
     assert r.recommended is not None
     assert r.recommended.capacity_kwh == 15
     assert r.recommended.payback_years == pytest.approx(7.0)
+    assert r.recommended.within_warranty
 
 
-def test_battery_is_no_when_no_size_pays_back_but_the_best_candidate_is_still_named():
+def test_battery_is_no_when_no_size_pays_back_within_its_service_life():
     """A bare "No" is useless to an advisor, so the best candidate and its
     payback must survive the verdict."""
     costs = _costs(_three(30000.0), {
@@ -210,41 +212,87 @@ def test_battery_is_no_when_no_size_pays_back_but_the_best_candidate_is_still_na
                   settings=Settings.defaults())
     assert r.recommended is None
     assert r.best_candidate is not None
-    assert r.best_candidate.payback_years > Settings.defaults().battery_lifetime_years
+    assert r.best_candidate.payback_years > Settings.defaults().battery_service_life_years
 
 
-def test_a_near_miss_on_the_warranty_is_flagged_against_the_service_life():
-    """The sentence the card adds: no on 10 years, yes on 15."""
+def test_a_battery_past_its_warranty_but_inside_its_service_life_is_recommended():
+    """**Test finding, 2026-10-06:** judging against the 10-year warranty made
+    this a 'No'. Judged against the 15-year service life -- the horizon that
+    actually decides whether the asset earns back its cost -- it is a 'Yes',
+    and within_warranty records that the payback relies on the battery
+    outliving its warranty, so the card can disclose that honestly."""
     # 5 kWh: 35 000 net, saves 3 000/yr -> 11.7 years. Past 10, inside 15.
     costs = _costs(_three(30000.0), {
         0: _three(20000.0), 5: _three(17000.0), 10: _three(17000.0), 15: _three(17000.0),
     })
     r = recommend(costs, system_price_sek=100000.0, battery_price_per_kwh_sek=7000.0,
                   settings=Settings.defaults())
-    assert r.recommended is None
-    assert r.best_on_service_life is not None
-    assert r.best_on_service_life.capacity_kwh == 5
+    assert r.recommended is not None
+    assert r.recommended.capacity_kwh == 5
+    assert r.recommended.payback_years == pytest.approx(11.667, abs=0.01)
+    assert not r.recommended.within_warranty
+    assert r.extra_income_to_flip_sek is None  # already recommended -- nothing to ask for
 
 
-def test_no_service_life_flag_when_the_battery_misses_both_horizons():
-    """So the sentence cannot degrade into boilerplate that always appears."""
+def test_extra_income_needed_is_reported_when_nothing_pays_back():
+    """The concrete number for 'what would it take' -- not a bare 'No'."""
     costs = _costs(_three(30000.0), {
         0: _three(20000.0), 5: _three(19800.0), 10: _three(19700.0), 15: _three(19600.0),
     })
     r = recommend(costs, system_price_sek=100000.0, battery_price_per_kwh_sek=7000.0,
                   settings=Settings.defaults())
     assert r.recommended is None
-    assert r.best_on_service_life is None
+    assert r.best_candidate.capacity_kwh == 5  # saves 200/yr on 35 000 -> shortest payback
+    # needs 35 000/15 = 2 333.33 SEK/yr total, already saves 200 -> 2 133.33 more
+    assert r.extra_income_to_flip_sek == pytest.approx(2133.33, abs=0.01)
 
 
-def test_no_service_life_flag_when_the_battery_already_pays_back():
+def test_no_extra_income_is_reported_when_a_battery_already_pays_back():
     costs = _costs(_three(30000.0), {
         0: _three(20000.0), 5: _three(10000.0), 10: _three(9000.0), 15: _three(8000.0),
     })
     r = recommend(costs, system_price_sek=100000.0, battery_price_per_kwh_sek=7000.0,
                   settings=Settings.defaults())
     assert r.recommended is not None
-    assert r.best_on_service_life is None
+    assert r.extra_income_to_flip_sek is None
+
+
+def test_other_battery_income_is_added_to_every_sizes_saving():
+    """The advisor-entered figure for stodtjanster / effektavgift -- not
+    derived from the (synthetic) consumption profile, just added flat."""
+    costs = _costs(_three(30000.0), {
+        0: _three(20000.0), 5: _three(19800.0), 10: _three(19700.0), 15: _three(19600.0),
+    })
+    plain = recommend(costs, system_price_sek=100000.0, battery_price_per_kwh_sek=7000.0,
+                      settings=Settings.defaults())
+    boosted = recommend(
+        costs, system_price_sek=100000.0, battery_price_per_kwh_sek=7000.0,
+        settings=Settings.defaults(other_battery_income_sek_per_year=1000.0),
+    )
+    for p, b in zip(plain.sizes, boosted.sizes):
+        assert b.savings.average == pytest.approx(p.savings.average + 1000.0)
+        assert b.payback_years < p.payback_years
+
+
+def test_extra_income_to_flip_sek_actually_flips_the_verdict_when_entered():
+    """Round-trip: the figure the 'No' card suggests must be self-consistent
+    -- entering at least that much as other_battery_income must produce a
+    'Yes' for exactly the size it was computed from."""
+    costs = _costs(_three(30000.0), {
+        0: _three(20000.0), 5: _three(19800.0), 10: _three(19700.0), 15: _three(19600.0),
+    })
+    no = recommend(costs, system_price_sek=100000.0, battery_price_per_kwh_sek=7000.0,
+                   settings=Settings.defaults())
+    assert no.recommended is None
+    needed = no.extra_income_to_flip_sek
+    flipped_size = no.best_candidate.capacity_kwh
+
+    yes = recommend(
+        costs, system_price_sek=100000.0, battery_price_per_kwh_sek=7000.0,
+        settings=Settings.defaults(other_battery_income_sek_per_year=needed + 1.0),
+    )
+    assert yes.recommended is not None
+    assert yes.recommended.capacity_kwh == flipped_size
 
 
 def test_a_battery_that_saves_nothing_has_no_payback_and_is_not_recommended():
@@ -281,7 +329,7 @@ def _recommendation_with_a_battery():
 
 def test_the_curve_starts_at_minus_the_investment():
     r = _recommendation_with_a_battery()
-    curve = payback_curve(r, solar_lifetime_years=25, battery_lifetime_years=10)
+    curve = payback_curve(r, solar_lifetime_years=25, battery_credit_years=15)
     first = curve[curve["year"] == 0]
     solar_row = first[first["series"] == "Solar only"].iloc[0]
     assert solar_row["average"] == pytest.approx(-r.solar.net_investment_sek)
@@ -289,17 +337,18 @@ def test_the_curve_starts_at_minus_the_investment():
 
 def test_the_curve_crosses_zero_at_the_payback_year():
     r = _recommendation_with_a_battery()
-    curve = payback_curve(r, solar_lifetime_years=25, battery_lifetime_years=10)
+    curve = payback_curve(r, solar_lifetime_years=25, battery_credit_years=15)
     crossing = break_even_year(curve, "Solar only")
     assert crossing == pytest.approx(round(r.solar.payback_years), abs=1)
 
 
-def test_the_battery_is_retired_at_its_lifetime_not_replaced():
-    """After the warranty year the combined line keeps accruing solar-only
+def test_the_battery_is_retired_at_battery_credit_years_not_replaced():
+    """After the credited year the combined line keeps accruing solar-only
     savings, so the two lines stay a fixed distance apart -- and that gap is
-    the battery's net lifetime result."""
+    the battery's net lifetime result. battery_credit_years should be passed
+    the service life, not the warranty -- see the function's docstring."""
     r = _recommendation_with_a_battery()
-    curve = payback_curve(r, solar_lifetime_years=25, battery_lifetime_years=10)
+    curve = payback_curve(r, solar_lifetime_years=25, battery_credit_years=15)
     combined = f"Solar + {r.recommended.capacity_kwh} kWh battery"
 
     def gap(year):
@@ -308,21 +357,21 @@ def test_the_battery_is_retired_at_its_lifetime_not_replaced():
                 - float(at[at["series"] == "Solar only"]["average"].iloc[0]))
 
     # the gap still moves while the battery is alive...
-    assert gap(10) != pytest.approx(gap(9))
+    assert gap(15) != pytest.approx(gap(14))
     # ...and is frozen afterwards, because the battery stopped earning
-    assert gap(25) == pytest.approx(gap(10))
+    assert gap(25) == pytest.approx(gap(15))
 
 
 def test_both_series_run_to_the_solar_lifetime():
     r = _recommendation_with_a_battery()
-    curve = payback_curve(r, solar_lifetime_years=25, battery_lifetime_years=10)
+    curve = payback_curve(r, solar_lifetime_years=25, battery_credit_years=15)
     for series, rows in curve.groupby("series"):
         assert rows["year"].max() == 25
 
 
 def test_the_curve_carries_the_range_as_well_as_the_average():
     r = _recommendation_with_a_battery()
-    curve = payback_curve(r, solar_lifetime_years=25, battery_lifetime_years=10)
+    curve = payback_curve(r, solar_lifetime_years=25, battery_credit_years=15)
     last = curve[(curve["series"] == "Solar only") & (curve["year"] == 25)].iloc[0]
     assert last["lowest"] <= last["average"] <= last["highest"]
 
@@ -333,5 +382,5 @@ def test_the_curve_has_only_a_solar_series_when_no_battery_ever_pays():
     })
     r = recommend(costs, system_price_sek=100000.0, battery_price_per_kwh_sek=7000.0,
                   settings=Settings.defaults())
-    curve = payback_curve(r, solar_lifetime_years=25, battery_lifetime_years=10)
+    curve = payback_curve(r, solar_lifetime_years=25, battery_credit_years=15)
     assert set(curve["series"]) == {"Solar only"}

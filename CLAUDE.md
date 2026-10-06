@@ -192,27 +192,37 @@ solvers.
     after the green technology deduction if it is switched on.
   - **Solar: yes if payback < solar lifetime** (default 25 years).
   - **Battery:** take the size with the shortest payback; recommend it **if that
-    payback < battery lifetime** (default 10 years, the typical warranty).
+    payback < the battery's expected service life** (default 15 years).
     Otherwise "No battery" — and the card must still name the best candidate and
-    its payback, because a bare "No" is useless to an advisor.
+    its payback, because a bare "No" is useless to an advisor, plus the extra
+    yearly income (see below) that would flip it.
+  - **The verdict is judged against the service life, not the warranty** (default
+    10 years). *Test finding, 2026-10-06:* judging against the warranty made every
+    realistically-priced battery say "No" — a warranty is a manufacturer's defect
+    guarantee, not a claim the asset stops being useful the day it expires. When a
+    "Yes" relies on the battery outliving its warranty, the card discloses that.
   - Battery payback is **marginal**: battery cost ÷ battery-only saving. That is
     the only reading that makes sense against a battery lifetime, and the UI says
     so, or it will be read as the whole system's payback.
-  - When the verdict is "No" on the warranty but would be "Yes" on the expected
-    **service life** (15–25 years), the card says so in one sentence. The
-    warranty stays the default and the verdict stays "No"; service life is used
-    for that sentence only, never for the decision.
+  - **Other battery income** (SEK/year, default 0, editable): grid support
+    services and capacity-charge savings, entered by the advisor from a real
+    offer or the customer's tariff — not simulated, because the consumption
+    profile below is a modelled assumption and a computed capacity-charge saving
+    from it would be an assumption dressed up as data. Added straight to the
+    battery's yearly saving before payback is computed.
 - **Green technology deduction** (optional, **off by default**): 15% on solar,
   50% on battery, capped at 50 000 SEK × number of **owners** (the law requires
   joint ownership and a split invoice). The cap applies to the **combined**
   deduction; when it binds, **solar is deducted first and the battery takes the
   remainder** — solar is bought first, and it keeps the solar card stable while
   the battery sizes are swept.
-- **Still excluded, and the UI must say so:** capacity/effekt-tariff savings
-  (49 kr/kW in this grid area — where a battery genuinely earns), frequency
-  regulation, degradation, electricity-price drift and discounting. Simple
-  payback is not NPV; over 15–25 years that is not a rounding error. These are
-  why an honest payback looks long.
+- **Still excluded from automatic simulation, and the UI must say so:**
+  capacity/effekt-tariff savings (49 kr/kW in this grid area) and grid support
+  services — creditable only via the advisor-entered "other battery income"
+  figure, never derived from the model's own synthetic consumption. Also
+  excluded entirely: panel degradation, electricity-price drift, discounting.
+  Simple payback is not NPV; over 15–25 years that is not a rounding error.
+  These are why an honest payback looks long.
 
 ## Dashboard
 One page, no tabs. Top to bottom:

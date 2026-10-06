@@ -39,7 +39,7 @@ source and the date it was last checked. Then, in order:
    the best candidate and how far off it is.
 2. **A payback curve** — cumulative savings from minus the investment, for solar alone and
    for solar plus the best battery, with the best and worst of the three years as a band.
-3. **A battery size chart** — what each size pays back in, against the warranty.
+3. **A battery size chart** — what each size pays back in, against its expected service life.
 4. **"Why?"** — an average day, production and spot price on a shared time axis, for summer,
    winter or the full year. The only chart whose job is explanation rather than a verdict.
 
@@ -52,12 +52,17 @@ For a 20 000 kWh villa with 10 kWp facing south, at 17 000 SEK/kWp and 7 000 SEK
 | | Verdict |
 |---|---|
 | **Solar** | **Yes** — 19 years, saving 9 176 SEK/year (7 639 – 11 338 across the three years) |
-| **Battery** | **No** — no size pays back inside its 10-year warranty; best case 5 kWh at 24 years |
+| **Battery** | **No** — no size pays back within its 15-year expected service life; best case 5 kWh at 24 years |
 
-The battery "No" is a finding, not a bug. Break-even is roughly 3 200–3 500 SEK/kWh without
-the deduction. The card says so, and adds the honest qualifier when it applies: with the
-deduction the best size lands at 12 years — past the warranty, but **inside** a typical
-15-year service life.
+The battery "No" is a finding, not a bug. **Test finding, 2026-10-06:** the verdict is judged
+against the battery's expected **service life** (15 years), not its warranty (10) — a warranty
+is a manufacturer's defect guarantee, not a claim the battery stops being useful the day it
+expires. Break-even for a 15-year payback is roughly 4 000–4 500 SEK/kWh without the
+deduction. With the green-technology deduction switched on, the best size (5 kWh) pays back
+in **12 years** — a "Yes", with a disclosure that it relies on the battery outliving its
+10-year warranty. When no size pays back at all, the card states the extra yearly income
+(from grid support services or capacity-charge savings) that would flip it — a concrete
+number for the "what would it take" conversation, not just a rejection.
 
 ## How the numbers are made
 
@@ -77,7 +82,15 @@ Every rule is simple enough to explain at a kitchen table. There is no optimiser
   `production = own use + to battery + sold + curtailed` and
   `consumption = own use + from battery + bought for the house`.
 - **Payback** = net investment ÷ average yearly saving. Solar is judged against a 25-year
-  life; each battery size against its **warranty**, on its *marginal* saving over solar alone.
+  life; each battery size against its **expected service life** (15 years), on its *marginal*
+  saving over solar alone — not its shorter warranty, which is a defect guarantee rather than
+  a statement of useful life. A payback that only clears the service life, not the warranty,
+  is disclosed as such rather than hidden.
+- **Other battery income** (SEK/year, default 0, editable): grid support services and
+  capacity-charge savings the advisor enters from a real offer or tariff, added straight to
+  the battery's saving. Not estimated from the hourly simulation — the consumption profile is
+  a modelled assumption, not the customer's real load, so a computed capacity-charge saving
+  from it would be an assumption dressed up as data.
 - **Green technology deduction**, optional and off by default: 15% on solar, 50% on battery,
   capped at 50 000 SEK per owner. The cap is combined, and when it binds the panels are
   deducted first.
@@ -92,12 +105,13 @@ alone would claim more certainty than the data supports.
 
 The honest list. These are why the payback looks long.
 
-- **Payback excludes the capacity charge (effektavgift)** — 49 SEK/kW in this grid area,
-  charged on the month's three highest hours. That is exactly where a battery earns, and it
-  is not modelled.
-- **It also excludes** frequency-regulation income, panel degradation, and any rise or fall
-  in electricity prices. **Payback here is simple payback, not a discounted calculation**;
-  over 15–25 years that is not a rounding error.
+- **The capacity charge (effektavgift, 49 SEK/kW in this grid area) and grid support services
+  are not simulated** — only creditable through the advisor-entered "Other battery income"
+  figure. This tool's hourly consumption is a modelled assumption, not the customer's real
+  load, so simulating a specific capacity-charge saving from it would not be honest.
+- **It also excludes** panel degradation and any rise or fall in electricity prices.
+  **Payback here is simple payback, not a discounted calculation**; over 15–25 years that is
+  not a rounding error.
 - **Household consumption is a modelled assumption**, not measured data. No open data exists
   for one household's hourly load, so the annual figure is spread using a typical villa shape
   — morning and evening peaks, winter roughly 2.6× heavier than summer. A customer's own

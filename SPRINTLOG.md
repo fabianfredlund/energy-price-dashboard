@@ -1405,3 +1405,94 @@ result.
 - An optional, measured improvement is designed but not built: replacing
   the 3 309 day-files with three concatenated CSVs would cut the cold read
   from ~4 s to ~0.13 s, which only the deployed app pays.
+
+## Test finding — the battery verdict never said yes (2026-10-06)
+
+### Trigger
+Using the shipped Sprint 9 app, Fabian noticed the battery card said "No" at
+every price he tried and asked: *"Think more like costs. Worth it or not?
+Because right now every battery is not worth it according to the system."*
+
+### Found
+Verified across the realistic market range (6 000–7 500 SEK/kWh, researched
+in Sprint 9) and the full 2 000–8 000 SEK/kWh sweep: **every battery size
+said "No" at every price above ~4 000 SEK/kWh**, even against the 15-year
+service life, not just the 10-year warranty the verdict was actually judged
+against at the time. Self-consumption rose from 50% (no battery) to 71%
+(15 kWh), so the battery was doing real work — the savings from that work
+just weren't being credited fully enough, and the verdict was failing
+against the wrong bar on top of that.
+
+### Root cause — two separate gaps
+1. **Wrong yardstick.** The verdict compared payback against the battery's
+   10-year *warranty*. A warranty is a manufacturer's defect guarantee, not
+   a claim that the asset stops being useful the day it expires — the
+   model's own `battery_service_life_years` (15 years) already existed for
+   exactly this distinction, but was only used to add a footnote to a "No",
+   never to decide the verdict itself.
+2. **Two unmodelled value streams.** Grid support services (stödtjänster)
+   and capacity-charge savings (effektavgift, 49 kr/kW in this grid area —
+   disclosed since Sprint 9 as excluded) are real income a battery earns,
+   and neither was in the calculation at all.
+
+Quantified before deciding what to build: even on the 15-year horizon, the
+best size at market price (7 000 SEK/kWh) paid back in 24.1 years — swapping
+the yardstick alone would not have fixed it. The gap to a 15-year payback at
+that price was ~884 SEK/year for the 5 kWh size — small next to what a real
+capacity-charge saving can plausibly be worth.
+
+### Built
+- `economics.recommend`: the verdict now judges each battery size against
+  **`battery_service_life_years`**, not `battery_lifetime_years`. The
+  warranty becomes `SizeResult.within_warranty`, a disclosed, lower-risk
+  sub-result rather than the decision itself.
+- New editable assumption, **`other_battery_income_sek_per_year`** (default
+  0), added directly to every battery size's yearly saving before payback is
+  computed. Deliberately **not derived from the simulation**: this tool's
+  hourly consumption is a modelled assumption, not the customer's real load,
+  so a computed capacity-charge saving from it would be an assumption
+  dressed up as data. The advisor enters a real figure from an aggregator
+  offer or the customer's tariff instead.
+- New `Recommendation.extra_income_to_flip_sek`: when no size pays back, the
+  exact yearly income the best candidate would need to cross the service-life
+  horizon — "No" now always comes with a concrete number, not just a
+  rejection. A round-trip test confirms entering that figure (or more) as
+  other-income actually flips the verdict for that size.
+- Card wording: a "Yes" that only clears the service life (not the warranty)
+  says so explicitly, e.g. *"paid back in 12 years. But: that payback
+  happens after the 10-year warranty ends — it relies on the battery lasting
+  into its expected 15-year service life."* A "No" states what extra income
+  would flip it.
+- The payback curve's and size chart's threshold lines moved from the
+  warranty to the service life, so the charts agree with the cards.
+
+### Decisions (and why)
+1. **Judge against service life, not warranty** (Fabian's call). The
+   economically correct yardstick for "is this worth it" is the asset's
+   useful life, not its defect guarantee. The warranty is kept as a
+   disclosed, lower-risk sub-result rather than discarded.
+2. **No peak-shaving simulation** (Fabian's call, rejected on principle, not
+   effort). The consumption profile is synthetic, so a modelled
+   capacity-charge saving would be the tool's own assumption restated as a
+   result — a specific number that looks like data but isn't. An
+   advisor-entered figure, sourced from a real offer or tariff, is honest in
+   a way a simulated one would not be.
+3. **The combined cap's apportionment (Sprint 9) is unaffected** — solar
+   still deducts first — since this finding is entirely about the decision
+   horizon and the new income term, not the deduction.
+
+### Alternatives considered and rejected (and why)
+- *Just widen `battery_lifetime_years`'s default number* (e.g. 10 → 15) —
+  rejected: collapses the warranty/service-life distinction into one number
+  and loses the honest "this relies on it outliving its warranty" disclosure
+  the two-horizon version gives for free.
+- *Model peak-shaving from the existing hourly simulation* — rejected; see
+  Decision 2. Flagged as a credible future addition once real (not
+  synthetic) hourly consumption data is available per customer.
+
+### Open questions for next sprint
+- Deployment and the user test are still outstanding from Sprint 8.
+- `other_battery_income_sek_per_year` is advisor-entered with no default
+  guidance beyond "ask the customer's grid operator or an aggregator" — a
+  worked example or a typical range for Göteborg Energi Nät would make it
+  easier to fill in correctly during a live meeting.

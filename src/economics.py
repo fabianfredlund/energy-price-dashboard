@@ -196,7 +196,10 @@ class SizeResult(NamedTuple):
     net_investment_sek: float
     savings: Savings  # vs no-solar for solar; vs solar-only for a battery
     payback_years: float | None
-    pays_back: bool  # within the lifetime it is judged against
+    pays_back: bool  # within the horizon the verdict is judged against (service life)
+    within_warranty: bool  # also inside the shorter warranty -- a stronger, lower-risk result.
+                            # For solar, which has no separate warranty concept, this mirrors
+                            # pays_back.
 
 
 class Recommendation(NamedTuple):
@@ -205,7 +208,7 @@ class Recommendation(NamedTuple):
     sizes: tuple[SizeResult, ...]  # the battery sizes, excluding 0
     recommended: SizeResult | None  # None => "Battery: No"
     best_candidate: SizeResult | None  # shortest payback even if it does not pay back
-    best_on_service_life: SizeResult | None  # qualifies a "No"; never decides one
+    extra_income_to_flip_sek: float | None  # see below; None unless recommended is None
 
 
 def recommend(
@@ -218,12 +221,34 @@ def recommend(
     """The four answers.
 
     `settings` is duck-typed (in practice `config.Settings`) and must expose
-    the two lifetimes, the service life, and the five green-tech fields.
+    the two lifetimes, the service life, the other-income figure, and the
+    five green-tech fields.
 
     Solar is judged against the solar lifetime on the saving versus no solar.
-    Each battery size is judged against the **battery warranty** on its
-    *marginal* saving versus solar alone. `best_on_service_life` exists only
-    so the UI can qualify a "No" — it never turns one into a "Yes".
+
+    **Each battery size is judged against its expected service life, not its
+    warranty.** Test finding, 2026-10-06: judging against the 10-year warranty
+    made every realistically-priced battery say "No" -- including ones that
+    comfortably pay for themselves over their real working life. A warranty is
+    a manufacturer's guarantee against defects, not a statement that the asset
+    stops being useful the day it expires, so it is the wrong yardstick for
+    "is this worth it". `within_warranty` still reports the stricter, lower-
+    risk result for disclosure -- a battery that pays back inside the warranty
+    is a stronger case than one that needs its full expected life to break
+    even, and the UI says so either way.
+
+    `settings.other_battery_income_sek_per_year` folds in value streams this
+    model cannot honestly derive itself -- grid support services (stödtjänster)
+    and capacity-charge savings (effektavgift) both depend on the customer's
+    real hourly load, and this tool's consumption profile is a modelled
+    assumption, not that. Defaults to 0 (none assumed); an advisor enters a
+    real figure from an aggregator offer or the customer's tariff, and it is
+    added to every battery size's yearly saving before payback is computed.
+
+    When no size pays back, `extra_income_to_flip_sek` is how much additional
+    yearly income (on top of whatever is already entered) the best candidate
+    would need to cross into "worth it" -- a concrete number for the
+    "what would it take" conversation, rather than a bare "No".
     """
     solar_only_costs = costs.by_size[0]
 
@@ -245,7 +270,7 @@ def recommend(
     solar_worth_it = solar_payback is not None and solar_payback < settings.solar_lifetime_years
     solar = SizeResult(
         0, system_price_sek, solar_deduction.solar_sek, solar_net,
-        solar_savings, solar_payback, solar_worth_it,
+        solar_savings, solar_payback, solar_worth_it, solar_worth_it,
     )
 
     # -- each battery size, on its marginal saving over solar alone --
@@ -255,10 +280,15 @@ def recommend(
         deduction = deduction_for(gross)
         net = gross - deduction.battery_sek
         marginal = savings(solar_only_costs, costs.by_size[capacity])
+        if settings.other_battery_income_sek_per_year:
+            marginal = Savings(tuple(
+                v + settings.other_battery_income_sek_per_year for v in marginal.per_year
+            ))
         payback = payback_years(net, marginal.average)
         sizes.append(SizeResult(
             capacity, gross, deduction.battery_sek, net, marginal, payback,
-            pays_back=payback is not None and payback < settings.battery_lifetime_years,
+            pays_back=payback is not None and payback < settings.battery_service_life_years,
+            within_warranty=payback is not None and payback < settings.battery_lifetime_years,
         ))
 
     paying = [s for s in sizes if s.pays_back]
@@ -266,16 +296,20 @@ def recommend(
     recommended = min(paying, key=lambda s: s.payback_years) if paying else None
     best_candidate = min(with_payback, key=lambda s: s.payback_years) if with_payback else None
 
-    # Only meaningful when the warranty verdict is "No": would a longer, and
-    # entirely plausible, service life have changed the answer?
-    best_on_service_life = None
+    # The concrete number for "what would it take": how much more yearly
+    # income the best candidate needs to cross the service-life horizon.
+    # Algebraically non-negative whenever this branch is reached: recommended
+    # is None means best_candidate.payback_years >= service_life, which is
+    # equivalent to its average saving <= net / service_life (= needed_average
+    # below), so needed_average - average is >= 0.
+    extra_income_to_flip_sek = None
     if recommended is None and best_candidate is not None:
-        if best_candidate.payback_years < settings.battery_service_life_years:
-            best_on_service_life = best_candidate
+        needed_average = best_candidate.net_investment_sek / settings.battery_service_life_years
+        extra_income_to_flip_sek = max(0.0, needed_average - best_candidate.savings.average)
 
     return Recommendation(
         solar, solar_worth_it, tuple(sizes), recommended, best_candidate,
-        best_on_service_life,
+        extra_income_to_flip_sek,
     )
 
 
@@ -285,18 +319,24 @@ def payback_curve(
     recommendation: Recommendation,
     *,
     solar_lifetime_years: int,
-    battery_lifetime_years: int,
+    battery_credit_years: int,
 ) -> pd.DataFrame:
     """Cumulative savings per year, long form, for the two series.
 
     Columns: `year`, `series`, `average`, `lowest`, `highest`.
 
-    **The battery is retired at its lifetime, not replaced.** From that year
-    on, the "solar + battery" series keeps accruing *solar-only* savings, so
-    the two lines run to the same horizon and stay a fixed distance apart —
-    and that gap is the battery's net lifetime result, readable off the chart
-    without arithmetic. Replacing it instead would require assuming the price
-    of a battery a decade from now, which nothing here knows.
+    **The battery is retired at `battery_credit_years`, not replaced.** From
+    that year on, the "solar + battery" series keeps accruing *solar-only*
+    savings, so the two lines run to the same horizon and stay a fixed
+    distance apart — and that gap is the battery's net lifetime result,
+    readable off the chart without arithmetic. Replacing it instead would
+    require assuming the price of a battery a decade from now, which nothing
+    here knows.
+
+    Pass the battery's **expected service life** here, not its warranty —
+    that is the horizon `recommend()` actually judges the battery against, so
+    the chart's retirement point has to agree with the card's verdict or the
+    two would visibly contradict each other.
     """
     rows = []
     solar = recommendation.solar
@@ -320,7 +360,7 @@ def payback_curve(
         b = battery.savings
 
         def step(year: int):
-            if year <= battery_lifetime_years:
+            if year <= battery_credit_years:
                 return (s.average + b.average, s.lowest + b.lowest, s.highest + b.highest)
             return (s.average, s.lowest, s.highest)  # battery retired
 

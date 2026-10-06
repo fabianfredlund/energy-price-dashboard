@@ -90,19 +90,22 @@ ASSUMPTIONS: dict[str, Assumption] = {
         "25 years. Not independently sourced.", False,
     ),
     "battery_lifetime_years": Assumption(
-        10, "years", "Battery warranty — the horizon the recommendation uses",
+        10, "years", "Battery warranty — a risk disclosure, not the verdict's horizon",
         _TODAY,
         "10 years is the most common home-battery warranty in Sweden (range "
         "5–10; quality units 10–15). Warranties typically guarantee 60–80% of "
-        "original capacity at expiry.", True,
+        "original capacity at expiry. Used only to flag when a payback relies "
+        "on the battery outliving its warranty -- see battery_service_life_years "
+        "for the horizon the Yes/No decision is actually judged against.", True,
     ),
     "battery_service_life_years": Assumption(
-        15, "years", "Expected service life — used only to qualify a 'No'",
-        _TODAY,
+        15, "years", "Expected service life — the horizon the verdict is judged against",
+        date(2026, 10, 6),
         "Expected service life runs 15–25 years, longer than the warranty. 15 is "
-        "the conservative end. This NEVER drives the recommendation; it only "
-        "lets the card say a battery that misses on warranty would pay off on "
-        "likely real life.", True,
+        "the conservative end. A warranty is a manufacturer's defect guarantee, "
+        "not the asset's useful life, so this -- not the warranty -- is what the "
+        "Yes/No decision is judged against. Test finding, 2026-10-06: judging "
+        "against the warranty made every realistic battery say 'No'.", True,
     ),
     # -- green technology deduction --
     "green_tech_solar_rate": Assumption(
@@ -148,13 +151,25 @@ ASSUMPTIONS: dict[str, Assumption] = {
         "percentage margin lowers the bar instead of raising it. Not "
         "independently sourced.", False,
     ),
-    # -- disclosed but NOT modelled --
+    # -- value streams the hourly simulation cannot honestly derive --
+    "other_battery_income_sek_per_year": Assumption(
+        0.0, "SEK/year", "Other battery income (grid support services, capacity-charge savings)",
+        date(2026, 10, 6),
+        "Advisor-entered, from a real aggregator offer (stödtjänster / frequency "
+        "regulation) or the customer's grid tariff (effektavgift savings from "
+        "peak shaving). Defaults to 0, not estimated by this tool: the hourly "
+        "consumption profile is a modelled assumption, not the customer's real "
+        "usage, so deriving a specific capacity-charge saving from it would be "
+        "an assumption dressed up as a simulation result. Included directly in "
+        "the battery's payback once entered.", True,
+    ),
     "effektavgift_sek_per_kw": Assumption(
-        49, "SEK/kW", "Capacity charge — excluded from the calculation",
+        49, "SEK/kW", "Capacity charge — not simulated, but creditable above",
         _TODAY,
         "Göteborg Energi Nät charges 49 kr per kW, on the mean of the month's "
         "three highest hourly averages. This is exactly where a battery earns, "
-        "and it is NOT modelled — which is part of why payback looks long.",
+        "and the real saving an advisor can quote belongs in 'Other battery "
+        "income' above rather than being simulated from synthetic consumption.",
         False,
     ),
 }
@@ -226,6 +241,7 @@ class Settings(NamedTuple):
     round_trip_efficiency: float
     battery_max_power_fraction: float
     grid_charge_min_margin_sek_per_kwh: float
+    other_battery_income_sek_per_year: float
 
     @classmethod
     def defaults(cls, **overrides) -> "Settings":
