@@ -338,3 +338,38 @@ def break_even_year(curve: pd.DataFrame, series: str) -> int | None:
     """First whole year where a series' cumulative average turns positive."""
     rows = curve[(curve["series"] == series) & (curve["average"] >= 0)]
     return int(rows["year"].iloc[0]) if not rows.empty else None
+
+
+# -- the "why?" chart ----------------------------------------------------------
+
+#: Months counted as summer and winter for the average-day chart. Split so
+#: each half is six months; the point is the contrast between them.
+SUMMER_MONTHS = (4, 5, 6, 7, 8, 9)
+WINTER_MONTHS = (10, 11, 12, 1, 2, 3)
+
+
+def average_day(frame: pd.DataFrame, months: tuple | None = None) -> pd.DataFrame:
+    """Mean production and mean spot price for each hour of the day.
+
+    Returns 24 rows: `hour`, `production_kwh`, `ore_per_kwh`. `months`
+    restricts the input; None averages the whole window.
+
+    This is the one chart whose job is explanation rather than conclusion:
+    production peaks at midday when the price is at its lowest, and the price
+    peaks in the evening when the roof has stopped. Everything else on the
+    page is a verdict; this is the reason behind it.
+
+    Averaging deliberately destroys spikes, which is why the result must
+    never be re-quantiled into price categories — doing so would label an
+    averaged 76 öre hour a "spike" when the true hourly 90th percentile over
+    the window is far higher.
+    """
+    rows = frame if months is None else frame[frame.index.month.isin(months)]
+    if rows.empty:
+        return pd.DataFrame({"hour": range(24), "production_kwh": 0.0, "ore_per_kwh": 0.0})
+    grouped = rows.groupby(rows.index.hour)
+    out = pd.DataFrame({
+        "production_kwh": grouped["production_kwh"].mean(),
+        "ore_per_kwh": grouped["SEK_per_kWh"].mean() * 100,
+    })
+    return out.reindex(range(24)).fillna(0.0).rename_axis("hour").reset_index()

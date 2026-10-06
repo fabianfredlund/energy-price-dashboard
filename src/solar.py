@@ -35,9 +35,10 @@ Two deliberate design points:
 """
 
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -197,12 +198,37 @@ def _slice_to_range(df: pd.DataFrame, start_date: date, end_date: date) -> pd.Da
     return df.loc[(df.index >= start_ts) & (df.index < end_ts)]
 
 
+def _settled_cache(cache_root: Path, key: str, days: list, today: date) -> dict | None:
+    """Every requested day, read from the snapshot, or None if any is missing.
+
+    A past day's irradiance is as settled as a past day's spot price: it is
+    measurement, and it does not change. So for a window wholly in the past
+    the API need not be consulted at all, which is what makes the app work
+    on a bad hotel wifi, keeps a Community Cloud cold start independent of
+    Open-Meteo being up, and keeps the test suite off the network.
+
+    All-or-nothing on purpose: a partial hit would still need the API call
+    for the rest, and one call answers the whole range anyway, so there is
+    nothing to gain from a partial read and a gap to miss by trying.
+    """
+    out = {}
+    for day in days:
+        if day >= today:
+            return None
+        cached = read_day_cache(cache_root, "solar", key, day, SOLAR_COLUMNS)
+        if cached is None or cached.empty:
+            return None
+        out[day] = cached
+    return out
+
+
 def _fetch(
     start_date: date,
     end_date: date,
     orientation: str,
     cache_root: Path,
     forecast: bool,
+    today: date | None = None,
 ) -> SolarFetchResult:
     """Shared body for the archive and forecast fetchers.
 
@@ -212,8 +238,22 @@ def _fetch(
     from an otherwise-successful payload is a benign gap -- absent, not
     failed, and no fallback attempted (the same distinction src/prices.py
     draws between a confirmed-404 day and an unreachable one).
+
+    A range entirely before `today` with a complete snapshot is served from
+    that snapshot and makes no request -- see `_settled_cache`. Such a hit
+    is the *primary* source, so it is reported as neither failed nor
+    fallback.
     """
     key = _cache_key(orientation)
+    days = _date_range(start_date, end_date)
+
+    if not forecast:
+        settled = _settled_cache(cache_root, key, days, today or _today_stockholm())
+        if settled is not None:
+            return SolarFetchResult(
+                pd.concat(settled.values()).sort_index(), [], []
+            )
+
     frames, call_failed = [], False
     for azimuth in ORIENTATIONS[orientation].azimuths:
         df, failed = _fetch_one_azimuth(azimuth, start_date, end_date, forecast)
@@ -226,7 +266,7 @@ def _fetch(
     sliced = _slice_to_range(_combine_azimuths(frames), start_date, end_date)
 
     frames_out, failed_days, fallback_days = [], [], []
-    for day in _date_range(start_date, end_date):
+    for day in days:
         day_df = _slice_to_range(sliced, day, day)
         if not day_df.empty:
             frames_out.append(day_df)
@@ -244,18 +284,23 @@ def _fetch(
     return SolarFetchResult(df, failed_days, fallback_days)
 
 
+def _today_stockholm() -> date:
+    return datetime.now(ZoneInfo("Europe/Stockholm")).date()
+
+
 def fetch_irradiance(
     start_date: date,
     end_date: date,
     orientation: str = DEFAULT_ORIENTATION,
     cache_root: Path = DEFAULT_CACHE_ROOT,
+    today: date | None = None,
 ) -> SolarFetchResult:
     """Historical hourly tilted irradiance for [start_date, end_date].
 
     Same (df, failed_days, fallback_days) shape as src/prices.py's
     fetch_prices, so app.py's fallback notices work unchanged.
     """
-    return _fetch(start_date, end_date, orientation, cache_root, forecast=False)
+    return _fetch(start_date, end_date, orientation, cache_root, forecast=False, today=today)
 
 
 def fetch_irradiance_forecast(

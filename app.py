@@ -1,123 +1,66 @@
-"""Solar Advisor — a sales tool for Kustsol's energy advisors.
+"""Solar Advisor — four answers for an energy advisor in a customer meeting.
 
-Tab 1 "Customer calculation" answers CLAUDE.md's five questions for a
-made-up customer from the last 12 months of real SE3 prices and real
-Gothenburg irradiance. Tab 2 "Tomorrow" makes the battery concrete;
-Sprint 8 owns it.
+1. Is solar worth it for this customer?
+2. How long until it pays back, and how much does it save per year?
+3. Should they get a battery?
+4. If yes, how big?
 
-Layout only. Every number comes from a pure function in src/ -- this file
-wires widgets to those functions and renders the result.
+Everything on screen serves one of those four. The hourly simulation runs
+underneath over three full years; the screen shows **conclusions, not data**.
 
-**Scope rule, stated once and repeated in the UI:** the yearly SEK
-figures, the donut, the scenario bars and the heatmap are always computed
-over the full 12 months. The date picker zooms the overlay chart and
-nothing else. Deriving a "yearly" figure from a hand-picked sunny week
-would be indefensible in front of a customer.
+Layout only. Every number comes from a pure function in `src/` — this file
+wires widgets to those functions and renders the result. No prose here
+restates a figure that lives in `config.py`.
 """
 
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
-
-import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from src.battery import (
-    build_frame,
-    buy_price,
-    compare_scenarios,
-    grid_charge_plan,
-    simulate,
-)
+from src.battery import build_frame, run_scenario
 from src.config import (
-    BATTERY_MAX_POWER_FRACTION,
-    BATTERY_ROUND_TRIP_EFFICIENCY,
+    ASSUMPTIONS,
+    BATTERY_SIZES_KWH,
     DEFAULT_ANNUAL_CONSUMPTION_KWH,
-    DEFAULT_BATTERY_KWH,
-    DEFAULT_BATTERY_PRICE_SEK,
+    DEFAULT_BATTERY_PRICE_SEK_PER_KWH,
     DEFAULT_KWP,
     DEFAULT_ORIENTATION,
-    ENERGY_TAX_SEK_PER_KWH,
-    GRID_BENEFIT_SEK_PER_KWH,
-    GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH,
-    GRID_FEE_SEK_PER_KWH,
+    DEFAULT_SYSTEM_PRICE_SEK,
     ORIENTATIONS,
     PANEL_TILT_DEG,
     PRICE_AREA,
-    SYSTEM_LOSS_FACTOR,
-    VAT_RATE,
+    WINDOW_END,
+    WINDOW_LABEL,
+    WINDOW_START,
+    Settings,
 )
-from src.consumption import MONTHLY_FACTORS
-from src.plan import GRID_CHARGE_EXPLANATION, build_day_plan, describe_step
+from src.economics import (
+    SUMMER_MONTHS,
+    WINTER_MONTHS,
+    YearlyCosts,
+    average_day,
+    break_even_year,
+    payback_curve,
+    recommend,
+    year_spans,
+    yearly_net_cost,
+)
 from src.prices import fetch_prices
-from src.solar import (
-    PRODUCTION_COLUMN,
-    fetch_irradiance,
-    fetch_irradiance_forecast,
-    production_kwh,
-)
-from src.transform import (
-    CATEGORY_ORDER,
-    categorize_by_price,
-    hourly_month_means,
-    price_kpis,
-    production_split,
-    resample_daily_mean,
-)
+from src.solar import PRODUCTION_COLUMN, fetch_irradiance, production_kwh
 
-STOCKHOLM = ZoneInfo("Europe/Stockholm")
-HOURLY_BAR_MAX_DAYS = 31
-MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-YEAR_DAYS = 365
-# Open-Meteo's archive reaches roughly two days back, so "the last 12
-# months" has to end there rather than today, or the most recent days come
-# back empty and the year is quietly short.
-ARCHIVE_LAG_DAYS = 2
-
-# Cheap/Expensive/Spike reuse the dataviz skill's fixed status palette
-# (good/serious/critical); Normal uses the skill's own "Muted" ink, per
-# CLAUDE.md's explicit "middle third -> neutral grey" instruction. The
-# skill's generic categorical-palette validator isn't the right tool for
-# this combination (it expects distinct hues, not one deliberate neutral)
-# -- the status palette is separately pre-validated in the skill's own
-# reference for exactly this purpose. The borderline contrast/CVD pairs
-# documented there are mitigated by secondary encoding already present
-# here: Plotly's always-visible legend, the plain-language caption below
-# every chart, and the per-bar hover tooltip, so colour is never the only
-# signal.
-CATEGORY_COLORS = {
-    "Cheap": "#0ca30c",
-    "Normal": "#898781",
-    "Expensive": "#ec835a",
-    "Spike": "#d03b3b",
-}
-PRODUCTION_COLOR = "#eda100"  # solar: the dataviz palette's yellow, distinct from every price category
-LEGEND_CAPTION = "Green = cheap, grey = normal, orange = expensive, red = price spike (top 10%)."
-
-# The donut's four destinations are ORDINAL, not categorical: own use ->
-# battery -> sold -> curtailed is a strict value ranking (avoids the buy
-# price, avoids it later, earns about spot, earns nothing). The dataviz
-# skill prescribes a one-hue ramp for that, darkest = most valuable, so
-# the reader sees the order in the colour. Two further reasons not to use
-# four hues here: the obvious categorical foursome FAILS the skill's
-# normal-vision separation gate on the orange/yellow pair (ΔE 13.7 against
-# a floor of 15) and a donut compares every slice with every other through
-# its legend; and CATEGORY_COLORS above is the reserved status palette,
-# which the skill forbids reusing as "series 4".
-FLOW_COLORS = {
-    "Own use": "#0d366b",
-    "To battery": "#1c5cab",
-    "Sold": "#3987e5",
-    "Curtailed": "#86b6ef",
-}
-# One hue for the three scenario bars, no legend: bar length already shows
-# the progression, and the skill is explicit that colouring nominal bars
-# by their value spends the identity channel re-encoding it.
-SCENARIO_COLOR = "#2a78d6"
-SURFACE = "#fcfcfb"
+# Two series on the payback curve. Validated with the dataviz skill's
+# checker (light surface, --pairs all): all checks pass, CVD ΔE 24.7.
+SOLAR_COLOR = "#2a78d6"
+BATTERY_COLOR = "#eb6834"
+# A two-step ordinal of the same blue for the size chart: the recommended
+# bar is darker. A selection state, not value-rank colouring — bar length
+# still carries the magnitude. Passes --ordinal.
+SIZE_COLOR = "#86b6ef"
+SIZE_COLOR_PICKED = "#2a78d6"
+# Status-critical red, used for its actual job: a threshold line.
+LIMIT_COLOR = "#d03b3b"
+PRODUCTION_COLOR = "#eda100"
+GRID_COLOR = "#e1e0d9"
 
 st.set_page_config(
     page_title="Solar Advisor",
@@ -134,737 +77,559 @@ st.set_page_config(
         )
     },
 )
-st.title("Solar Advisor")
-st.caption(
-    f"Does solar — and a battery — pay off for this customer? "
-    f"Real {PRICE_AREA} spot prices and real Gothenburg sunshine."
-)
-
-
-def _now_stockholm() -> datetime:
-    return datetime.now(STOCKHOLM)
 
 
 def _sek(value: float) -> str:
-    """SEK with a thin space as the thousands separator, never öre.
-
-    CLAUDE.md: all money in SEK. Per-kWh *rates* stay in öre/kWh on the
-    chart and heatmap, which is the conventional Swedish unit for a rate;
-    every total is SEK.
-    """
+    """SEK with a thin space as the thousands separator, never öre."""
     return f"{value:,.0f} SEK".replace(",", " ")
 
 
-def _twelve_month_window(today: date) -> tuple[date, date]:
-    end = today - timedelta(days=ARCHIVE_LAG_DAYS)
-    return end - timedelta(days=YEAR_DAYS - 1), end
+def _years(value: float | None) -> str:
+    return "never" if value is None else f"{value:.0f} years"
 
 
-def _summer_week(start: date, end: date) -> tuple[date, date]:
-    """A week in mid-June inside the window, so the pivot's whole point is
-    visible before the advisor touches a control: production peaks at
-    midday, exactly when the price bottoms out, while the price peaks in
-    the evening when the roof has stopped producing.
-
-    Derived from the window rather than hardcoded -- a fixed date would
-    silently fall outside the range as the window rolls forward.
-    """
-    for year in (end.year, end.year - 1):
-        candidate = date(year, 6, 15)
-        if start <= candidate and candidate + timedelta(days=6) <= end:
-            return candidate, candidate + timedelta(days=6)
-    return max(start, end - timedelta(days=6)), end
+def _kwh(value: float) -> str:
+    """kWh with a thin-space separator. Separate from _sek so the grouping
+    substitution only ever touches the number, never a sentence's commas."""
+    return f"{value:,.0f}".replace(",", "\u00a0") + " kWh"
 
 
-# -- cached data and computation ----------------------------------------------
+# -- data and computation ------------------------------------------------------
 #
-# Keyed on scalars only (date / str / float / None all hash correctly;
-# DataFrames do not). Two things here are load-bearing rather than
-# cosmetic:
+# Split exactly on the measured boundary between what forces a re-simulation
+# and what is only arithmetic. Editing the system price, the battery price,
+# the deduction, the owners or the lifetimes costs milliseconds; editing the
+# surcharge, VAT, consumption, kWp or orientation costs a couple of seconds,
+# because the surcharge genuinely re-enters the battery's grid-charging rule.
 #
-# 1. Prices are keyed WITHOUT orientation. Both orientations are computed
-#    for the question-5 comparison, and keying prices together with the
-#    orientation would fetch a year of prices twice on first load.
-# 2. max_entries is set everywhere. st.cache_data returns a copy, i.e. it
-#    pickles, and a ScenarioComparison carries three 8760-row detail
-#    frames (~4 MB). The default is unbounded, so a few minutes of slider
-#    work would pile up hundreds of MB against Community Cloud's ~1 GB.
-#
-# Deliberately NO ttl on the two year-long fetchers: the key is the window
-# itself, so the cache already invalidates when the window rolls over at
-# midnight, and a settled past spot price never changes. A ttl would
-# re-issue 365 requests every hour of a working session -- a stall in the
-# middle of a customer meeting, and poor citizenship toward a free API.
+# `max_entries` is set on every one: `st.cache_data` pickles, and Community
+# Cloud has about a gigabyte. `YearlyCosts` is deliberately a handful of
+# floats so it can be cached freely — caching the simulation's detail frames
+# would be megabytes per entry for data no element on this page reads.
 
 
-@st.cache_data(max_entries=2, show_spinner=f"Fetching 12 months of {PRICE_AREA} spot prices…")
-def _cached_year_prices(start: date, end: date):
-    return fetch_prices(start, end, PRICE_AREA)
+@st.cache_data(max_entries=2, show_spinner=f"Loading three years of {PRICE_AREA} spot prices…")
+def _prices():
+    # No arguments: the window is a fixed constant, so there is one answer.
+    return fetch_prices(WINDOW_START, WINDOW_END, PRICE_AREA)
 
 
-@st.cache_data(max_entries=4, show_spinner="Fetching 12 months of Gothenburg sunshine…")
-def _cached_year_irradiance(start: date, end: date, orientation: str):
-    return fetch_irradiance(start, end, orientation)
+@st.cache_data(max_entries=4, show_spinner="Loading three years of Gothenburg sunshine…")
+def _irradiance(orientation: str):
+    return fetch_irradiance(WINDOW_START, WINDOW_END, orientation)
 
 
 @st.cache_data(max_entries=8, show_spinner=False)
-def _cached_year_frame(start: date, end: date, orientation: str, kwp: float, annual_kwh: float):
-    prices, p_failed, p_fallback = _cached_year_prices(start, end)
-    irradiance, s_failed, s_fallback = _cached_year_irradiance(start, end, orientation)
-    production = production_kwh(irradiance, kwp)[PRODUCTION_COLUMN]
+def _frame(orientation: str, kwp: float, annual_kwh: float, loss: float):
+    prices, p_failed, p_fallback = _prices()
+    irradiance, s_failed, s_fallback = _irradiance(orientation)
+    production = production_kwh(irradiance, kwp, loss=loss)[PRODUCTION_COLUMN]
     frame, missing = build_frame(production, prices, annual_kwh)
     return frame, missing, (p_failed, p_fallback, s_failed, s_fallback)
 
 
-@st.cache_data(max_entries=8, show_spinner="Simulating the year, hour by hour…")
-def _cached_scenarios(start: date, end: date, orientation: str, kwp: float,
-                      annual_kwh: float, capacity_kwh: float, battery_price_sek: float | None):
-    frame, _, _ = _cached_year_frame(start, end, orientation, kwp, annual_kwh)
-    return compare_scenarios(frame, capacity_kwh, battery_price_sek)
+@st.cache_data(max_entries=16, show_spinner="Simulating three years, hour by hour…")
+def _yearly_costs(
+    orientation: str, kwp: float, annual_kwh: float, loss: float,
+    vat_rate: float, surcharge: float,
+    efficiency: float, power_fraction: float, margin: float,
+) -> YearlyCosts:
+    """The expensive layer. Every argument that changes a simulated flow is
+    in the key — including the three battery parameters no widget exposes
+    yet, so adding one later cannot silently reuse a stale entry."""
+    frame, _, _ = _frame(orientation, kwp, annual_kwh, loss)
+    settings = Settings.defaults(
+        vat_rate=vat_rate, surcharge_sek_per_kwh=surcharge,
+        round_trip_efficiency=efficiency, battery_max_power_fraction=power_fraction,
+        grid_charge_min_margin_sek_per_kwh=margin,
+    )
+    spans = year_spans(WINDOW_START, WINDOW_END)
+    years = len(spans)
 
-
-@st.cache_data(ttl=600)  # short TTL: "is tomorrow published yet" can flip within a session
-def _cached_fetch_prices_tomorrow(start, end, area):
-    return fetch_prices(start, end, area)
-
-
-@st.cache_data(ttl=3600)
-def _cached_fetch_irradiance_forecast(start, end, orientation):
-    return fetch_irradiance_forecast(start, end, orientation)
-
-
-def _render_fallback_notices(fallback_days: list, failed_days: list, source: str = "data") -> None:
-    """Outage notices. `source` names which feed degraded -- without it a
-    simultaneous price and sunshine outage shows two identical messages
-    and the advisor cannot tell what is missing."""
-    if fallback_days:
-        st.info(
-            f"{len(fallback_days)} day(s) of {source} served from the offline cache — "
-            f"the API was unreachable, so the last saved snapshot was used."
+    no_solar = run_scenario(frame, 0.0, with_solar=False, settings=settings)
+    by_size, self_consumption, grid_days = {}, {}, {}
+    curtailed = production = 0.0
+    for capacity in BATTERY_SIZES_KWH:
+        result = run_scenario(frame, float(capacity), with_solar=True, settings=settings)
+        by_size[capacity] = yearly_net_cost(result.detail, spans)
+        self_consumption[capacity] = result.self_consumption_share
+        detail = result.detail
+        grid_days[capacity] = int(
+            (detail["grid_charge_kwh"].groupby(detail.index.date).sum() > 0).sum()
         )
+        if capacity == 0:
+            production = float(detail["production_kwh"].sum()) / years
+            curtailed = float(detail["curtailed_kwh"].sum()) / years
+
+    return YearlyCosts(
+        spans=spans,
+        no_solar=yearly_net_cost(no_solar.detail, spans),
+        by_size=by_size,
+        production_kwh_per_year=production,
+        curtailed_kwh_per_year=curtailed,
+        self_consumption_by_size=self_consumption,
+        grid_charge_days_by_size=grid_days,
+    )
+
+
+@st.cache_data(max_entries=12, show_spinner=False)
+def _average_day(orientation: str, kwp: float, annual_kwh: float, loss: float, season: str):
+    frame, _, _ = _frame(orientation, kwp, annual_kwh, loss)
+    months = {"Summer (Apr–Sep)": SUMMER_MONTHS, "Winter (Oct–Mar)": WINTER_MONTHS}.get(season)
+    return average_day(frame, months)
+
+
+def _render_fallback_notices(fallback_days, failed_days, source: str) -> None:
+    if fallback_days:
+        st.info(f"{len(fallback_days)} day(s) of {source} came from an older snapshot.")
     if failed_days:
         st.warning(
-            f"{len(failed_days)} day(s) of {source} could not be fetched and had no "
-            f"cached snapshot: {failed_days}"
+            f"{len(failed_days)} day(s) of {source} could not be loaded, so the "
+            f"figures cover slightly less than three full years."
         )
 
 
-def _build_price_figure(price_df, price_col, prod_df=None, now_marker=None):
-    """Price bars on top; when solar production is shown, a second panel
-    below sharing the same time axis.
+# -- the assumptions box -------------------------------------------------------
 
-    Deliberately NOT a second y-axis on one panel: the dataviz skill
-    treats dual-axis as the #1 chart mistake, and here the shared time
-    axis is the whole point -- the advisor's pitch is *when* production
-    happens versus *when* power is expensive, which you read off the x
-    axis, not off two arbitrarily-aligned y scales.
+def _provenance(key: str) -> str:
+    a = ASSUMPTIONS[key]
+    mark = "" if a.verified else "⚠ "
+    return f"{mark}{a.source}  \n*Last updated {a.updated:%-d %b %Y}.*"
+
+
+def _render_assumptions() -> Settings:
+    """The editable box. Returns the values every calculation then uses.
+
+    Nothing downstream reads `config` directly, so what is returned here is
+    what the whole page is computed from — which is the only way an edit can
+    be trusted to take effect.
     """
-    show_prod = prod_df is not None and not prod_df.empty
-    if show_prod:
-        fig = make_subplots(
-            rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-            row_heights=[0.7, 0.3],
-        )
-    else:
-        fig = make_subplots(rows=1, cols=1)
-
-    for cat in CATEGORY_ORDER:
-        subset = price_df[price_df["category"] == cat]
-        if subset.empty:
-            continue
-        fig.add_trace(
-            go.Bar(
-                x=subset.index, y=subset[price_col], name=cat,
-                marker_color=CATEGORY_COLORS[cat],
-                hovertemplate=f"%{{x|%Y-%m-%d %H:%M}}<br>%{{y:.1f}} öre/kWh<br>{cat}<extra></extra>",
-            ),
-            row=1, col=1,
+    defaults = Settings.defaults()
+    with st.expander("Assumptions and deductions — every number here is editable"):
+        st.caption(
+            "Each value shows where it came from and when it was last checked. "
+            "⚠ marks one nobody has verified yet."
         )
 
-    if show_prod:
-        fig.add_trace(
-            go.Scatter(
-                x=prod_df.index, y=prod_df[PRODUCTION_COLUMN], name="Solar production (kWh)",
-                mode="lines", line=dict(color=PRODUCTION_COLOR, width=2),
-                fill="tozeroy", fillcolor="rgba(237,161,0,0.15)",
-                hovertemplate="%{x|%Y-%m-%d %H:%M}<br>%{y:.2f} kWh<extra></extra>",
-            ),
-            row=2, col=1,
+        st.markdown("**Green technology deduction**")
+        enabled = st.checkbox(
+            "Apply the green technology deduction", value=False,
+            help="Off by default, so the figures above are the conservative case.",
+        )
+        owners = 1
+        if enabled:
+            owners = int(st.number_input(
+                "Number of owners", min_value=1, max_value=10, value=1, step=1,
+                help=_provenance("green_tech_cap_per_owner_sek"),
+            ))
+            st.caption(
+                f"{ASSUMPTIONS['green_tech_solar_rate'].value:.0%} on solar and "
+                f"{ASSUMPTIONS['green_tech_battery_rate'].value:.0%} on the battery, "
+                f"capped at {_sek(ASSUMPTIONS['green_tech_cap_per_owner_sek'].value * owners)} "
+                f"in total. When the cap binds, the panels are deducted first and the "
+                f"battery takes what is left."
+            )
+
+        st.divider()
+        st.markdown("**Price of bought electricity**")
+        left, right = st.columns(2)
+        surcharge_ore = left.number_input(
+            f"Surcharge ({ASSUMPTIONS['surcharge_sek_per_kwh'].unit.replace('SEK', 'öre')})",
+            min_value=0.0, max_value=300.0,
+            value=float(defaults.surcharge_sek_per_kwh * 100), step=1.0,
+            help=_provenance("surcharge_sek_per_kwh"),
+        )
+        vat_percent = right.number_input(
+            "VAT on the spot price (%)", min_value=0.0, max_value=50.0,
+            value=float(defaults.vat_rate * 100), step=1.0,
+            help=_provenance("vat_rate"),
+        )
+        st.caption(
+            "Buy price = spot × (1 + VAT) + surcharge. Sold power earns the bare "
+            "spot price."
         )
 
-    if now_marker is not None:
-        fig.add_vline(x=now_marker, line_dash="dot", line_color="#52514e",
-                       annotation_text="Now", row=1, col=1)
+        st.divider()
+        st.markdown("**Lifetimes**")
+        left, right = st.columns(2)
+        solar_life = int(left.number_input(
+            "Solar (years)", min_value=5, max_value=40,
+            value=int(defaults.solar_lifetime_years), step=1,
+            help=_provenance("solar_lifetime_years"),
+        ))
+        battery_life = int(right.number_input(
+            "Battery warranty (years)", min_value=1, max_value=30,
+            value=int(defaults.battery_lifetime_years), step=1,
+            help=_provenance("battery_lifetime_years"),
+        ))
+        st.caption(
+            f"The battery is judged on its **warranty**. Its expected *service life* "
+            f"is {ASSUMPTIONS['battery_service_life_years'].value:.0f}–25 years, which "
+            f"is used only to qualify a 'No', never to turn one into a 'Yes'."
+        )
 
-    fig.update_layout(template="plotly_white", bargap=0.1, showlegend=True)
-    fig.update_yaxes(gridcolor="#e1e0d9", title_text="öre/kWh", row=1, col=1)
-    if show_prod:
-        fig.update_yaxes(gridcolor="#e1e0d9", title_text="kWh", row=2, col=1)
-    return fig
+        st.divider()
+        st.markdown("**Not included in these figures**")
+        st.markdown(
+            f"- **Capacity charge (effektavgift)** — "
+            f"{ASSUMPTIONS['effektavgift_sek_per_kw'].value:.0f} SEK/kW in this grid "
+            f"area, charged on the month's three highest hours. This is exactly "
+            f"where a battery earns, and it is not modelled.\n"
+            f"- **Frequency regulation income**, panel degradation, and any rise or "
+            f"fall in electricity prices.\n"
+            f"- Payback here is simple payback — investment divided by yearly "
+            f"saving — **not** a discounted calculation. Over 15–25 years that is "
+            f"not a rounding error.\n"
+            f"- The **fixed** annual grid charge is excluded on purpose: it does not "
+            f"change with solar or a battery, so it cancels out of every comparison.\n"
+            f"- Household consumption is a **modelled assumption**, not this "
+            f"customer's measured data."
+        )
 
-
-def _render_heatmap(prices_df, price_col):
-    long_form = hourly_month_means(prices_df, price_col)
-    if long_form.empty:
-        st.info("Not enough data to build the hour × month heatmap for this range.")
-        return
-    coded = categorize_by_price(long_form, price_col)
-    code_map = {cat: i for i, cat in enumerate(CATEGORY_ORDER)}
-    coded["code"] = coded["category"].map(code_map)
-
-    price_grid = coded.pivot(index="month", columns="hour", values=price_col).reindex(
-        index=range(1, 13), columns=range(24)
+    return Settings.defaults(
+        vat_rate=vat_percent / 100,
+        surcharge_sek_per_kwh=surcharge_ore / 100,
+        solar_lifetime_years=solar_life,
+        battery_lifetime_years=battery_life,
+        green_tech_enabled=enabled,
+        green_tech_owners=owners,
     )
-    code_grid = coded.pivot(index="month", columns="hour", values="code").reindex(
-        index=range(1, 13), columns=range(24)
-    )
 
-    n = len(CATEGORY_ORDER)
-    colorscale = []
-    for i, cat in enumerate(CATEGORY_ORDER):
-        colorscale += [[i / n, CATEGORY_COLORS[cat]], [(i + 1) / n, CATEGORY_COLORS[cat]]]
 
-    fig = go.Figure(
-        go.Heatmap(
-            z=code_grid.values,
-            x=[f"{h:02d}" for h in range(24)],
-            y=MONTH_LABELS,
-            zmin=-0.5, zmax=n - 0.5,
-            colorscale=colorscale,
-            customdata=price_grid.values,
-            hovertemplate="%{y} %{x}:00<br>%{customdata:.1f} öre/kWh<extra></extra>",
-            colorbar=dict(
-                title="Category", tickmode="array",
-                tickvals=list(range(n)), ticktext=CATEGORY_ORDER,
-            ),
-            xgap=2, ygap=2,
+# -- the four elements ---------------------------------------------------------
+
+def _render_answer_cards(rec, settings) -> None:
+    left, right = st.columns(2)
+
+    with left, st.container(border=True):
+        s = rec.solar
+        if rec.solar_worth_it:
+            st.markdown(
+                f"### :material/check_circle: Solar: **Yes**\n"
+                f"Paid back in **{_years(s.payback_years)}**, saving "
+                f"**{_sek(s.savings.average)}/year**."
+            )
+        else:
+            st.markdown(
+                f"### :material/cancel: Solar: **No**\n"
+                f"It would save **{_sek(s.savings.average)}/year**, which covers "
+                f"{_sek(s.net_investment_sek)} in **{_years(s.payback_years)}** — "
+                f"longer than the panels' {settings.solar_lifetime_years}-year life."
+            )
+        st.caption(
+            f"Range across the three years: {_sek(s.savings.lowest)} to "
+            f"{_sek(s.savings.highest)} a year. "
+            f"Investment {_sek(s.net_investment_sek)}"
+            + (f" after a {_sek(s.deduction_sek)} deduction." if s.deduction_sek else ".")
         )
+
+    with right, st.container(border=True):
+        if rec.recommended is not None:
+            b = rec.recommended
+            st.markdown(
+                f"### :material/check_circle: Battery: **Yes, {b.capacity_kwh} kWh**\n"
+                f"Paid back in **{_years(b.payback_years)}**, saving a further "
+                f"**{_sek(b.savings.average)}/year**."
+            )
+            st.caption(
+                f"Range {_sek(b.savings.lowest)} to {_sek(b.savings.highest)} a year. "
+                f"That payback is the battery on its own — what it adds on top of the "
+                f"panels, against its own cost."
+            )
+        else:
+            best = rec.best_candidate
+            detail = (
+                f"The best case is **{best.capacity_kwh} kWh at "
+                f"{_years(best.payback_years)}**."
+                if best is not None else
+                "No size saves enough to pay back at all."
+            )
+            st.markdown(
+                f"### :material/cancel: Battery: **No**\n"
+                f"No size pays for itself within its "
+                f"{settings.battery_lifetime_years}-year warranty. {detail}"
+            )
+            if rec.best_on_service_life is not None:
+                life = settings.battery_service_life_years
+                st.markdown(
+                    f"**But:** that is the verdict on the "
+                    f"{settings.battery_lifetime_years}-year *warranty*. On an "
+                    f"expected **{life}-year service life** it would pay off"
+                    + (" with the deduction applied." if settings.green_tech_enabled
+                       else " — and sooner with the green technology deduction.")
+                )
+            st.caption(
+                "Battery payback is what the battery adds on top of the panels, "
+                "against its own cost — not the whole system's payback."
+            )
+
+
+def _render_payback_curve(rec, settings) -> None:
+    curve = payback_curve(
+        rec,
+        solar_lifetime_years=settings.solar_lifetime_years,
+        battery_lifetime_years=settings.battery_lifetime_years,
     )
+    fig = go.Figure()
+    colors = {"Solar only": SOLAR_COLOR}
+    series_names = list(dict.fromkeys(curve["series"]))
+    for name in series_names:
+        if name != "Solar only":
+            colors[name] = BATTERY_COLOR
+
+    for name in series_names:
+        rows = curve[curve["series"] == name]
+        colour = colors[name]
+        rgb = tuple(int(colour[i:i + 2], 16) for i in (1, 3, 5))
+        # The range is drawn in the series' OWN hue, translucent -- a third
+        # colour would claim to be a third thing, and a grey band fails the
+        # palette's chroma floor.
+        fig.add_trace(go.Scatter(
+            x=list(rows["year"]) + list(rows["year"])[::-1],
+            y=list(rows["highest"]) + list(rows["lowest"])[::-1],
+            fill="toself", fillcolor=f"rgba({rgb[0]},{rgb[1]},{rgb[2]},0.15)",
+            line=dict(width=0), hoverinfo="skip", showlegend=False,
+        ))
+        fig.add_trace(go.Scatter(
+            x=rows["year"], y=rows["average"], name=name, mode="lines",
+            line=dict(color=colour, width=2),
+            hovertemplate="Year %{x}<br>%{y:,.0f} SEK<extra>" + name + "</extra>",
+        ))
+        crossing = break_even_year(curve, name)
+        if crossing is not None:
+            fig.add_trace(go.Scatter(
+                x=[crossing], y=[0], mode="markers",
+                marker=dict(color=colour, size=9),
+                showlegend=False,
+                hovertemplate=f"Paid back, year {crossing}<extra></extra>",
+            ))
+
+    fig.add_hline(y=0, line_dash="dot", line_color="#52514e")
+    if rec.recommended is not None or rec.best_candidate is not None:
+        fig.add_vline(
+            x=settings.battery_lifetime_years, line_dash="dot", line_color="#898781",
+            annotation_text="Battery end of life", annotation_position="top left",
+        )
     fig.update_layout(
-        template="plotly_white", title="Average price by hour of day and month"
+        template="plotly_white", title="What it is worth over time",
+        xaxis=dict(title="Years from installation", gridcolor=GRID_COLOR),
+        yaxis=dict(title="Cumulative saving (SEK)", gridcolor=GRID_COLOR),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        margin=dict(r=140),  # outside annotations clip without this
     )
-    # Plotly puts the first y value at the bottom, which would stand January
-    # at the foot of the chart and read as December-first.
-    fig.update_yaxes(autorange="reversed")
     st.plotly_chart(fig, width="stretch")
-    st.caption(
-        "Each cell is the average price for that hour in that month. Read it for the "
-        "season: the expensive cells cluster on winter mornings and evenings, which is "
-        "exactly when a roof produces least. " + LEGEND_CAPTION
+
+    note = (
+        "Each line starts at minus the investment and climbs by the yearly saving; "
+        "the shaded band is the best and worst of the three years. Where it crosses "
+        "zero is the payback."
     )
+    if rec.recommended is not None or rec.best_candidate is not None:
+        note += (
+            f" The battery stops earning at {settings.battery_lifetime_years} years and "
+            f"is not replaced, so from there the two lines run parallel — **the gap "
+            f"between them is what the battery was worth over its whole life**."
+        )
+    st.caption(note)
 
 
-def _render_overlay_chart(frame, start, end, title, now_marker=None):
-    """Price bars with the production line below, over [start, end]."""
-    span_days = (end - start).days + 1
-    # DateOffset, never Timedelta: 24 absolute hours lands at 01:00 the
-    # next morning on the spring-forward day and would drag one row of the
-    # following date into the slice.
-    start_ts = pd.Timestamp(start, tz=STOCKHOLM)
-    end_ts = pd.Timestamp(end, tz=STOCKHOLM) + pd.DateOffset(days=1)
-    window = frame.loc[(frame.index >= start_ts) & (frame.index < end_ts)]
-
-    if window.empty:
-        st.info("No data for the selected range.")
+def _render_size_chart(rec, settings) -> None:
+    sizes = [s for s in rec.sizes if s.payback_years is not None]
+    if not sizes:
+        st.info("No battery size saves enough to pay back at any price, so there is "
+                "nothing to compare.")
         return
 
-    prices_df = window.assign(ore_per_kWh=window["SEK_per_kWh"] * 100)
-    prod_df = window[[PRODUCTION_COLUMN]]
-
-    if span_days > HOURLY_BAR_MAX_DAYS:
-        price_rows = categorize_by_price(
-            resample_daily_mean(prices_df, columns=["ore_per_kWh"]), "ore_per_kWh"
-        )
-        # a daily *sum*, not a mean: production is energy, and a day's
-        # total kWh is the number an advisor actually quotes
-        prod_df = prod_df.resample("1D").sum()
-    else:
-        price_rows = categorize_by_price(prices_df, "ore_per_kWh")
-
-    st.subheader(title)
-    fig = _build_price_figure(price_rows, "ore_per_kWh", prod_df, now_marker)
-    st.plotly_chart(fig, width="stretch")
-
-
-def _render_donut(detail):
-    split = production_split(detail)
-    total = float(split.sum())
-    if total <= 0:
-        st.info("No production in this period, so there is nothing to split.")
-        return
-
-    # Drop destinations that got nothing: with no battery, "To battery
-    # 0 kWh (0.0%)" is a zero-width slice with an outside label and a
-    # legend entry, which reads as a rendering fault. The filter is
-    # `> 0`, deliberately not a "too small to see" threshold -- curtailed
-    # is only 0.3% and must survive, since power thrown away is itself an
-    # argument for a battery.
-    split = split[split > 0]
-    labels = list(split.index)
-    fig = go.Figure(
-        go.Pie(
-            labels=labels, values=split.tolist(), hole=0.55,
-            sort=False, direction="clockwise",  # keep the energy-flow order so the ramp reads as a ramp
-            marker=dict(
-                colors=[FLOW_COLORS[label] for label in labels],
-                line=dict(color=SURFACE, width=2),
-            ),
-            texttemplate="%{label}<br>%{percent:.1%}",
-            # outside, not inside: the curtailed slice is a fraction of a
-            # percent and an inside label would collide with its neighbour
-            textposition="outside",
-            hovertemplate="%{label}<br>%{value:,.0f} kWh/yr (%{percent:.1%})<extra></extra>",
-        )
-    )
-    fig.update_layout(
-        template="plotly_white", showlegend=True,
-        title="Where the solar power goes (last 12 months)",
-        annotations=[dict(text=f"{total:,.0f}".replace(",", "\u00a0") + "<br>kWh/yr",
-                          x=0.5, y=0.5, showarrow=False, font=dict(size=16))],
-    )
-    st.plotly_chart(fig, width="stretch")
-
-    # The curtailed sliver is too small for any arc to show, so the exact
-    # numbers go in text as well.
-    parts = " · ".join(
-        f"{label.lower()} {value:,.0f} kWh ({value / total:.1%})".replace(",", " ")
-        for label, value in split.items()
-    )
-    st.caption(
-        f"{parts}. Look at “sold”: that share earns roughly the bare spot price now that "
-        f"the 60 öre/kWh tax reduction is gone — it is exactly what a battery moves into "
-        f"“own use”, where each kWh instead avoids the full buy price."
-    )
-
-
-def _render_scenario_bars(comparison):
-    scenarios = [
-        ("No solar", comparison.no_solar),
-        ("Solar only", comparison.solar_only),
-        ("Solar + battery", comparison.solar_battery),
-    ]
-    names = [name for name, _ in scenarios]
-    costs = [s.cost_sek for _, s in scenarios]
-
-    fig = go.Figure(
-        go.Bar(
-            x=costs, y=names, orientation="h",
-            marker=dict(color=SCENARIO_COLOR),
-            text=[_sek(c) for c in costs],
-            textposition="outside", cliponaxis=False,
-            hovertemplate="%{y}<br>%{x:,.0f} SEK/yr<extra></extra>",
-        )
+    picked = rec.recommended.capacity_kwh if rec.recommended else None
+    fig = go.Figure(go.Bar(
+        x=[f"{s.capacity_kwh} kWh" for s in sizes],
+        y=[s.payback_years for s in sizes],
+        marker=dict(color=[
+            SIZE_COLOR_PICKED if s.capacity_kwh == picked else SIZE_COLOR for s in sizes
+        ]),
+        text=[f"{s.payback_years:.0f} yr" for s in sizes],
+        textposition="outside", cliponaxis=False,
+        hovertemplate="%{x}<br>pays back in %{y:.1f} years<extra></extra>",
+    ))
+    fig.add_hline(
+        y=settings.battery_lifetime_years, line_dash="dash", line_color=LIMIT_COLOR,
+        annotation_text=f"{settings.battery_lifetime_years}-year warranty",
+        annotation_position="top left",
     )
     fig.update_layout(
         template="plotly_white", showlegend=False,
-        title="Yearly electricity cost (last 12 months)",
-        xaxis=dict(title="SEK per year", gridcolor="#e1e0d9"),
-        yaxis=dict(autorange="reversed"),  # "No solar" at the top, so it reads top-down
-        margin=dict(r=120),  # room for the outside labels
+        title="How long each battery size takes to pay for itself",
+        xaxis=dict(title=None),
+        yaxis=dict(title="Years to pay back", gridcolor=GRID_COLOR),
+        margin=dict(r=140, t=70),
     )
     st.plotly_chart(fig, width="stretch")
+
+    missing = [s.capacity_kwh for s in rec.sizes if s.payback_years is None]
+    note = (
+        "A bar below the red line pays for itself inside its warranty; above it, it "
+        "does not. **0 kWh is not shown — there is nothing to pay back.**"
+    )
+    if missing:
+        note += f" {', '.join(f'{m} kWh' for m in missing)} saves nothing at all."
+    st.caption(note)
+
+
+def _render_why(orientation: str, kwp: float, annual_kwh: float, loss: float) -> None:
+    season = st.selectbox(
+        "Season", ["Summer (Apr–Sep)", "Winter (Oct–Mar)", "Full year"], index=0,
+    )
+    day = _average_day(orientation, kwp, annual_kwh, loss, season)
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.5, 0.5],
+    )
+    hours = [f"{h:02d}" for h in day["hour"]]
+    fig.add_trace(go.Bar(
+        x=hours, y=day["ore_per_kwh"], marker_color=SOLAR_COLOR, name="Spot price",
+        hovertemplate="%{x}:00<br>%{y:.0f} öre/kWh<extra></extra>",
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=hours, y=day["production_kwh"], mode="lines", name="Production",
+        line=dict(color=PRODUCTION_COLOR, width=2),
+        fill="tozeroy", fillcolor="rgba(237,161,0,0.18)",
+        hovertemplate="%{x}:00<br>%{y:.2f} kWh<extra></extra>",
+    ), row=2, col=1)
+
+    # The production yellow carries a contrast warning against this surface,
+    # so it ships with a visible label rather than relying on the hue alone.
+    peak = day.loc[day["production_kwh"].idxmax()]
+    fig.add_annotation(
+        x=f"{int(peak['hour']):02d}", y=float(peak["production_kwh"]),
+        text=f"peak {peak['production_kwh']:.1f} kWh",
+        showarrow=True, arrowhead=0, ax=0, ay=-24, row=2, col=1,
+    )
+    fig.update_layout(
+        template="plotly_white", showlegend=False, bargap=0.15,
+        title="An average day — when power is dear, and when the roof makes it",
+        margin=dict(t=70),
+    )
+    fig.update_yaxes(title_text="öre/kWh", gridcolor=GRID_COLOR, row=1, col=1)
+    fig.update_yaxes(title_text="kWh per hour", gridcolor=GRID_COLOR, row=2, col=1)
+    fig.update_xaxes(title_text="Hour of day", row=2, col=1)
+    st.plotly_chart(fig, width="stretch")
+
+    cheapest = day.loc[day["ore_per_kwh"].idxmin()]
+    dearest = day.loc[day["ore_per_kwh"].idxmax()]
     st.caption(
-        "The gap between the first two bars is what the panels are worth; the gap "
-        "between the last two is what the battery adds on top."
+        f"Production peaks at {int(peak['hour']):02d}:00. The price is at its lowest "
+        f"around {int(cheapest['hour']):02d}:00 ({cheapest['ore_per_kwh']:.0f} öre) and "
+        f"its highest at {int(dearest['hour']):02d}:00 "
+        f"({dearest['ore_per_kwh']:.0f} öre). **That gap is the whole argument:** the "
+        f"roof produces when power is cheap, and the house needs it when power is dear. "
+        f"Using it yourself avoids the full buy price; selling it earns only the spot "
+        f"price. A battery moves power from one to the other. Two panels, one shared "
+        f"time axis — never a second y-axis."
     )
 
 
-def _tomorrow_plan(prices_df, solar_df, tomorrow: date, annual_kwh: float, capacity_kwh: float):
-    """Tomorrow's plan, its flow table, and (with_battery, without) cost.
+# -- the page ------------------------------------------------------------------
 
-    **Simulates the whole 48-hour window and slices tomorrow out, rather
-    than simulating tomorrow alone.** `simulate` starts the battery empty,
-    so a day-alone run assumes an empty battery at midnight -- which is
-    wrong on the 151 days of the committed year that end with charge still
-    in it. Measured against a continuous year: day-alone overstates the
-    day's cost by a mean of 2.53 SEK and up to 13.21 SEK, with an error
-    above 1 SEK on 144 of 367 days, against a figure the UI displays as
-    8-21 SEK. One warm-up day reproduces the continuous-year result
-    exactly on every day measured.
-
-    It costs nothing, because both days are already fetched for the chart.
-    (Exactness is an empirical property of these rules -- the battery
-    reaches empty at some hour on most days, which re-anchors it -- not a
-    proof, so the Assumptions text says the plan assumes today runs as
-    modelled.)
-    """
-    production = solar_df[PRODUCTION_COLUMN]
-    frame48, _ = build_frame(production, prices_df, annual_kwh)
-    if frame48.empty:
-        return build_day_plan(frame48), frame48, None
-
-    detail = simulate(frame48, capacity_kwh)
-    day_detail = detail[detail.index.date == tomorrow]
-
-    surplus = (frame48["production_kwh"] - frame48["consumption_kwh"]).clip(lower=0)
-    reasons = grid_charge_plan(
-        buy_price(frame48["SEK_per_kWh"]), surplus, capacity_kwh
-    ).reasons
-    plan = build_day_plan(day_detail, reasons.get(tomorrow))
-
-    # Two scenarios, not three: "no solar" is not the Tomorrow question,
-    # and compare_scenarios would also compute a payback, which is
-    # meaningless for a single day.
-    money = None
-    if capacity_kwh > 0:
-        without = simulate(frame48, 0.0)
-        money = (
-            float(day_detail["net_cost_sek"].sum()),
-            float(without[without.index.date == tomorrow]["net_cost_sek"].sum()),
-        )
-    return plan, day_detail, money
-
-
-def _render_assumptions():
-    with st.expander("Assumptions — what these numbers rest on"):
-        st.markdown(
-            f"""
-**Production**
-- {PANEL_TILT_DEG}° roof pitch, system losses {SYSTEM_LOSS_FACTOR:.0%} of theoretical
-  (inverter, cabling, soiling, temperature).
-- An east–west roof is modelled as half the array each way (the mean of the
-  −90° and +90° irradiance series).
-- Irradiance is real measured data for Gothenburg, not a typical year.
-
-**Prices**
-- Buy price = (spot + energy tax {ENERGY_TAX_SEK_PER_KWH:.2f} + grid fee
-  {GRID_FEE_SEK_PER_KWH:.2f}) × (1 + VAT {VAT_RATE:.0%}).
-- Sell price = spot + grid benefit (nätnytta) {GRID_BENEFIT_SEK_PER_KWH:.2f}, no VAT.
-- ⚠️ The grid benefit is a **placeholder that has not been sourced yet**, and it
-  moves every figure involving exported power. Verify it against the customer's
-  grid operator before quoting.
-- The **fixed** annual grid charge is excluded on purpose: it does not change with
-  solar or a battery, so it cancels out of every comparison above.
-
-**Battery**
-- Round trip {BATTERY_ROUND_TRIP_EFFICIENCY:.0%}, booked entirely on discharge —
-  "put 10 kWh in, get 9 kWh back".
-- Max charge/discharge per hour = capacity × {BATTERY_MAX_POWER_FRACTION}.
-- Solar charges the battery first. The grid only tops up what the sun is not
-  expected to give, and only when the saving clears the round-trip loss by at
-  least {GRID_CHARGE_MIN_MARGIN_SEK_PER_KWH:.2f} SEK/kWh.
-- The battery discharges in hours priced above that day's median.
-
-**Consumption — an assumption, not measured data**
-- There is no open data for one household's hourly consumption. The annual figure
-  entered above is spread over the year using a typical villa shape: morning and
-  evening peaks, and winter months roughly
-  {MONTHLY_FACTORS[0] / MONTHLY_FACTORS[6]:.1f}× heavier than summer.
-- A real customer's own hourly data would replace this and is the single biggest
-  improvement available to these numbers.
-
-**Not included in payback**
-- The green-technology deduction (*grön teknik*).
-- Capacity/effekt-tariff savings.
-- Frequency-regulation income (FCR-D and similar).
-- The fixed annual grid charge, as above.
-
-These four are where Swedish home-battery economics actually lives — they are why
-an honest payback figure looks long.
-            """
-        )
-
-
-# -- inputs (shared by both tabs) ---------------------------------------------
-
-today = _now_stockholm().date()
-window_start, window_end = _twelve_month_window(today)
+st.title("Solar Advisor")
+st.caption(
+    f"Is solar worth it for this customer — and a battery? Real {PRICE_AREA} spot "
+    f"prices and real Gothenburg sunshine, {WINDOW_LABEL}."
+)
 
 with st.container(border=True):
     st.markdown("**The customer**")
-    c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1.2, 1, 1.3])
-    annual_kwh = c1.number_input(
-        "Annual consumption (kWh)", min_value=1000.0, max_value=60000.0,
-        value=DEFAULT_ANNUAL_CONSUMPTION_KWH, step=1000.0,
+    c1, c2, c3, c4, c5 = st.columns([1.1, 0.9, 1.1, 1.1, 1.1])
+    annual_kwh = float(c1.number_input(
+        "Annual consumption (kWh)", min_value=1000, max_value=60000,
+        value=DEFAULT_ANNUAL_CONSUMPTION_KWH, step=1000,
         help="From the customer's electricity bill or grid operator.",
-    )
-    kwp = c2.slider(
-        "System size (kWp)", min_value=2.0, max_value=30.0,
-        value=DEFAULT_KWP, step=0.5,
-    )
+    ))
+    kwp = float(c2.number_input(
+        "System size (kWp)", min_value=2, max_value=30, value=DEFAULT_KWP, step=1,
+    ))
     orientation = c3.selectbox(
         "Roof orientation", list(ORIENTATIONS),
         index=list(ORIENTATIONS).index(DEFAULT_ORIENTATION),
     )
-    capacity_kwh = c4.slider(
-        "Battery (kWh)", min_value=0.0, max_value=30.0,
-        value=DEFAULT_BATTERY_KWH, step=1.0,
-        help="0 means no battery — the comparison still shows what one would add.",
+    system_price = float(c4.number_input(
+        "System price (SEK)", min_value=0, max_value=1000000,
+        value=DEFAULT_SYSTEM_PRICE_SEK, step=5000,
+        help="Installed, before any deduction.",
+    ))
+    battery_price_per_kwh = float(c5.number_input(
+        "Battery price (SEK/kWh)", min_value=0, max_value=30000,
+        value=DEFAULT_BATTERY_PRICE_SEK_PER_KWH, step=250,
+        help="Installed, before any deduction.",
+    ))
+
+settings = _render_assumptions()
+
+try:
+    frame, missing_hours, notices = _frame(
+        orientation, kwp, annual_kwh, settings.system_loss_factor
     )
-    battery_price_input = c5.number_input(
-        "Battery price (SEK, optional)", min_value=0.0, max_value=400000.0,
-        value=DEFAULT_BATTERY_PRICE_SEK, step=5000.0,
-        help="Installed price before any deduction. Leave at 0 to hide payback.",
-    )
-battery_price = battery_price_input or None
-
-tab_customer, tab_tomorrow = st.tabs(["Customer calculation", "Tomorrow"])
-
-with tab_customer:
-    try:
-        frame, missing_hours, notices = _cached_year_frame(
-            window_start, window_end, orientation, kwp, annual_kwh
-        )
-        p_failed, p_fallback, s_failed, s_fallback = notices
-        _render_fallback_notices(p_fallback, p_failed, "spot prices")
-        _render_fallback_notices(s_fallback, s_failed, "sunshine")
-    except Exception:
-        st.error(
-            "Could not load 12 months of data right now. Check the connection and "
-            "reload — the figures below need a full year to be honest."
-        )
-        st.stop()
-
-    if frame.empty:
-        st.warning("No overlapping price and sunshine data for the last 12 months.")
-        st.stop()
-
-    if missing_hours:
-        st.info(
-            f"{missing_hours} hour(s) had sunshine data but no price and were left out, "
-            f"so the yearly figures cover slightly less than a full year."
-        )
-
-    comparison = _cached_scenarios(
-        window_start, window_end, orientation, kwp, annual_kwh, capacity_kwh, battery_price
-    )
-
-    # --- 1. the four numbers the advisor quotes -----------------------------
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric(
-        "Value of solar", f"{_sek(comparison.solar_value_sek)}/yr",
-        help="Yearly electricity cost without solar, minus the cost with solar only.",
-        border=True,
-    )
-    if capacity_kwh <= 0:
-        # "0 SEK/yr" reads as a disappointing result rather than as "you
-        # haven't asked the question yet"
-        k2.metric(
-            "Value of the battery", "—",
-            help="No battery selected — move the battery slider to size one.",
-            border=True,
-        )
-    else:
-        k2.metric(
-            "Value of the battery", f"{_sek(comparison.battery_value_sek)}/yr",
-            help="What the battery adds on top of the panels, over the same 12 months.",
-            border=True,
-        )
-    k3.metric(
-        "Self-consumption", f"{comparison.solar_battery.self_consumption_share:.0%}",
-        help=(
-            "Share of production used on site rather than exported. "
-            f"Without a battery: {comparison.solar_only.self_consumption_share:.0%}."
-        ),
-        border=True,
-    )
-    if battery_price is None:
-        payback_value, payback_help = "—", "Enter a battery price to see payback."
-    elif comparison.payback_years is None:
-        payback_value = "—"
-        payback_help = "This battery size saves nothing at these prices, so there is no payback."
-    else:
-        payback_value = f"{comparison.payback_years:.0f} years"
-        payback_help = "Simple payback: price ÷ yearly value. See Assumptions for what is excluded."
-    k4.metric("Battery payback", payback_value, help=payback_help, border=True)
-
-    st.caption(
-        f"**All yearly figures above cover the full 12 months, "
-        f"{window_start:%d %b %Y} – {window_end:%d %b %Y}.** The date picker further down "
-        f"zooms the chart only — it never changes these numbers."
-    )
-
-    # --- question 5, as one line rather than a second set of controls ------
-    other_orientation = next(
-        (name for name in ORIENTATIONS if name != orientation), None
-    )
-    if other_orientation is not None:
-        try:
-            other = _cached_scenarios(
-                window_start, window_end, other_orientation, kwp, annual_kwh,
-                capacity_kwh, battery_price,
-            )
-            other_payback = (
-                f", payback {other.payback_years:.0f} years"
-                if other.payback_years is not None else ""
-            )
-            st.caption(
-                f"**Roof orientation:** on {'an' if other_orientation[0] in 'AEIOU' else 'a'} "
-                f"{other_orientation.lower()} roof the same system is worth "
-                f"{_sek(other.solar_value_sek)}/yr and the battery "
-                f"{_sek(other.battery_value_sek)}/yr{other_payback}. Orientation usually "
-                f"moves the battery's value more than the panels' — a flatter east–west "
-                f"curve already matches the household's morning and evening peaks, so less "
-                f"has to go through the battery."
-            )
-        except Exception:
-            pass  # the comparison is a nice-to-have; never block the main figures
-
-    st.divider()
-
-    # --- 2. the overlay: when the sun shines vs when power is expensive ----
-    picked = st.date_input(
-        "Zoom the chart (does not affect the figures above)",
-        value=_summer_week(window_start, window_end),
-        min_value=window_start, max_value=window_end,
-    )
-    if len(picked) != 2:
-        st.info("Pick an end date to see the chart.")
-    else:
-        chart_start, chart_end = sorted(picked)
-        # the window spans a year boundary, so the start needs its own year
-        # whenever the two differ -- "04 Oct – 03 Oct 2026" reads as one year
-        start_fmt = "%d %b" if chart_start.year == chart_end.year else "%d %b %Y"
-        _render_overlay_chart(
-            frame, chart_start, chart_end,
-            f"{PRICE_AREA} price and solar production, "
-            f"{chart_start.strftime(start_fmt)} – {chart_end:%d %b %Y}",
-        )
-        st.caption(
-            "Look at midday: production peaks when the price is at its lowest, while the "
-            "price peaks in the evening when the roof has already stopped. That gap is "
-            "what the battery bridges. " + LEGEND_CAPTION
-        )
-
-    st.divider()
-
-    # --- 3 and 4. where the power goes, and what each scenario costs -------
-    left, right = st.columns(2)
-    with left:
-        _render_donut(comparison.solar_battery.detail)
-    with right:
-        _render_scenario_bars(comparison)
-
-    st.divider()
-
-    # --- 5. the seasonal price pattern -------------------------------------
-    _render_heatmap(frame.assign(ore_per_kWh=frame["SEK_per_kWh"] * 100), "ore_per_kWh")
-
-    # --- 6. assumptions ----------------------------------------------------
-    _render_assumptions()
-
-with tab_tomorrow:
-    now = _now_stockholm()
-    today_d, tomorrow_d = now.date(), now.date() + timedelta(days=1)
-    now_marker = pd.Timestamp(now).floor("h") + pd.Timedelta(minutes=30)
-
-    solar_df = None
-    try:
-        irradiance, s_failed, s_fallback = _cached_fetch_irradiance_forecast(
-            today_d, tomorrow_d, orientation
-        )
-        _render_fallback_notices(s_fallback, s_failed, "sunshine forecast")
-        solar_df = production_kwh(irradiance, kwp)
-    except Exception:
-        st.error("Solar forecast unavailable right now; showing prices only.")
-
-    prices_df, p_failed, p_fallback = _cached_fetch_prices_tomorrow(
-        today_d, tomorrow_d, PRICE_AREA
-    )
+    p_failed, p_fallback, s_failed, s_fallback = notices
     _render_fallback_notices(p_fallback, p_failed, "spot prices")
+    _render_fallback_notices(s_fallback, s_failed, "sunshine")
+except Exception:
+    st.error(
+        "Could not load the three years of data this calculation needs. Check the "
+        "connection and reload."
+    )
+    st.stop()
 
-    tomorrow_present = not prices_df.empty and (prices_df.index.date == tomorrow_d).any()
-    if not tomorrow_present:
-        if tomorrow_d in p_failed:
-            st.warning("Tomorrow's prices could not be fetched and have no cached snapshot.")
-        else:
-            st.info("Tomorrow's prices aren't published yet (usually by ~13:00). Showing today only.")
-        # Without this, the 10-minute cache can keep saying "not published"
-        # for up to 10 minutes after they appear -- the one moment where an
-        # advisor would conclude the tool is broken and be unable to fix it.
-        if st.button("Check again"):
-            _cached_fetch_prices_tomorrow.clear()
-            st.rerun()
+if frame.empty:
+    st.warning("No overlapping price and sunshine data for the window.")
+    st.stop()
+if missing_hours:
+    st.info(f"{missing_hours} hour(s) had sunshine data but no price and were left out.")
 
-    if prices_df.empty:
-        st.info("No published prices for today or tomorrow.")
-    else:
-        hourly = prices_df.assign(ore_per_kWh=prices_df["SEK_per_kWh"] * 100)
-        price_rows = categorize_by_price(hourly, "ore_per_kWh")
-        span = "today and tomorrow" if tomorrow_present else "today"
-        st.subheader(f"{PRICE_AREA} — {span}")
-        fig = _build_price_figure(price_rows, "ore_per_kWh", solar_df, now_marker)
-        st.plotly_chart(fig, width="stretch")
-        st.caption(
-            f"Forecast production for a {kwp:.1f} kWp {orientation.lower()} system. "
-            + LEGEND_CAPTION
-        )
+costs = _yearly_costs(
+    orientation, kwp, annual_kwh, settings.system_loss_factor,
+    settings.vat_rate, settings.surcharge_sek_per_kwh,
+    settings.round_trip_efficiency, settings.battery_max_power_fraction,
+    settings.grid_charge_min_margin_sek_per_kwh,
+)
+rec = recommend(
+    costs,
+    system_price_sek=system_price,
+    battery_price_per_kwh_sek=battery_price_per_kwh,
+    settings=settings,
+)
 
-    st.divider()
-    st.subheader("What your battery would do tomorrow")
+_render_answer_cards(rec, settings)
+st.caption(
+    f"Averages of three full years — {', '.join(s.label for s in costs.spans)} — "
+    f"with today's prices and rules applied to all three. The range matters: the "
+    f"three years differ a lot, and a single average would claim more certainty "
+    f"than the data supports."
+)
 
-    if not tomorrow_present or solar_df is None or solar_df.empty:
-        st.info(
-            "The battery plan needs both tomorrow's prices and tomorrow's sunshine "
-            "forecast. Prices are usually published by ~13:00 — try the button above "
-            "after that."
-        )
-    else:
-        plan, day_detail, money = _tomorrow_plan(
-            prices_df, solar_df, tomorrow_d, annual_kwh, capacity_kwh
-        )
+st.divider()
+_render_payback_curve(rec, settings)
 
-        if capacity_kwh <= 0:
-            st.info(
-                "No battery selected. Move the battery slider above to see what one "
-                "would do with tomorrow's prices."
-            )
-        elif not plan.steps:
-            # 25 of 365 days of the committed year genuinely produce no
-            # steps: a dark day never charges, so it never discharges. The
-            # honest message IS the finding, with the reason attached.
-            st.warning(
-                "**Your battery would stay idle tomorrow.** "
-                + GRID_CHARGE_EXPLANATION.get(plan.grid_charge_reason or "", "")
-            )
-        else:
-            for step in plan.steps:
-                st.markdown("- " + describe_step(step))
-            if plan.grid_charge_reason and plan.grid_charge_reason != "charged":
-                st.caption(GRID_CHARGE_EXPLANATION[plan.grid_charge_reason])
+st.divider()
+_render_size_chart(rec, settings)
 
-        if capacity_kwh > 0 and money is not None:
-            with_battery, without_battery = money
-            saved = without_battery - with_battery
-            m1, m2 = st.columns(2)
-            m1.metric(
-                "Tomorrow with your battery", _sek(with_battery),
-                help="Cost of bought power minus what the exported surplus earns.",
-                border=True,
-            )
-            m2.metric(
-                "Tomorrow without it", _sek(without_battery),
-                delta=f"{_sek(-saved)} with the battery",
-                delta_color="inverse",  # a lower bill is good news
-                border=True,
-            )
-            if saved < 1.0:
-                st.caption(
-                    f"**Tomorrow the battery barely earns anything** — tomorrow's prices "
-                    f"are too flat for it to pay. That is an honest bad day, not a broken "
-                    f"tool; judge the battery on the year, not on tomorrow."
-                )
-            else:
-                st.caption(
-                    f"The battery saves **{_sek(saved)}** tomorrow. "
-                    f"**One day is not a year** — the yearly figure is in Customer "
-                    f"calculation, and tomorrow is a single day's weather and prices."
-                )
+st.divider()
+st.subheader("Why?")
+_render_why(orientation, kwp, annual_kwh, settings.system_loss_factor)
 
-        tomorrow_rows = hourly[hourly.index.date == tomorrow_d]
-        kpis = price_kpis(tomorrow_rows, "ore_per_kWh")
-        if kpis is not None:
-            st.caption(
-                f"Tomorrow runs from {kpis.cheapest_price:.0f} öre at "
-                f"{kpis.cheapest_time:%H:%M} to {kpis.priciest_price:.0f} öre at "
-                f"{kpis.priciest_time:%H:%M} — a spread of "
-                f"{kpis.priciest_price - kpis.cheapest_price:.0f} öre/kWh. "
-                f"That spread is what the battery gets paid for."
-            )
+_curtailed_note = (
+    f", of which roughly {_kwh(costs.curtailed_kwh_per_year)} is thrown away because "
+    f"the price went below zero and there was nowhere to put it — which is itself an "
+    f"argument for a battery."
+    if costs.curtailed_kwh_per_year >= 1 else "."
+)
+st.caption(
+    f"Over a year this roof makes about {_kwh(costs.production_kwh_per_year)}"
+    + _curtailed_note
+)
 
 st.caption(
     "Elpriser tillhandahålls av [Elpriset just nu.se](https://www.elprisetjustnu.se). "
     "Weather data by [Open-Meteo.com](https://open-meteo.com). "
-    "Consumption is a modelled assumption, not the customer's measured data — "
-    "see Assumptions."
+    f"Production modelled at {PANEL_TILT_DEG}° tilt. Household consumption is a "
+    "modelled assumption, not measured data — see Assumptions. Kustsol AB is a "
+    "fictional client; this is a course project and not financial advice."
 )

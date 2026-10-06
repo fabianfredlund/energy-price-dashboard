@@ -206,11 +206,55 @@ def test_fetch_irradiance_falls_back_to_cache_on_failure(monkeypatch, cache_root
     monkeypatch.setattr(requests, "get", lambda url, params=None, timeout=None: _FakeResponse(503))
     monkeypatch.setattr("src.solar.time.sleep", lambda s: None)
 
-    result = fetch_irradiance(day, day, "South", cache_root=cache_root)
+    # today=day, so the day is not settled and the fast path does not apply --
+    # this test is about the *outage* path, which still exists underneath it
+    result = fetch_irradiance(day, day, "South", cache_root=cache_root, today=day)
 
     assert result.fallback_days == [day]
     assert result.failed_days == []
     assert len(result.df) == 24
+
+
+def test_a_settled_range_is_served_from_cache_without_any_request(monkeypatch, cache_root):
+    """The fast path: a window wholly in the past never touches Open-Meteo.
+
+    That is what keeps a Community Cloud cold start independent of the API
+    being up, lets the app work on a bad hotel wifi in a customer meeting,
+    and keeps this test suite off the network.
+    """
+    day = date(2026, 6, 15)
+    seeded = _irradiance_df(datetime(2026, 6, 14, 22, 0, tzinfo=timezone.utc), [42.0] * 24)
+    write_day_cache(cache_root, "solar", _cache_key("South"), day, seeded)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a settled day must not be fetched")
+    monkeypatch.setattr(requests, "get", boom)
+
+    result = fetch_irradiance(day, day, "South", cache_root=cache_root,
+                              today=date(2026, 6, 16))
+
+    assert len(result.df) == 24
+    # a settled hit is the primary source, not a degraded one
+    assert result.fallback_days == []
+    assert result.failed_days == []
+
+
+def test_an_incomplete_snapshot_falls_through_to_the_api(monkeypatch, cache_root):
+    """All-or-nothing: one missing day sends the whole range to the API,
+    because one call answers the whole range anyway."""
+    first, second = date(2026, 6, 15), date(2026, 6, 16)
+    seeded = _irradiance_df(datetime(2026, 6, 14, 22, 0, tzinfo=timezone.utc), [42.0] * 24)
+    write_day_cache(cache_root, "solar", _cache_key("South"), first, seeded)  # only one of two
+
+    calls = []
+    monkeypatch.setattr(
+        requests, "get",
+        lambda url, params=None, timeout=None: calls.append(url) or _FakeResponse(503),
+    )
+    monkeypatch.setattr("src.solar.time.sleep", lambda s: None)
+
+    fetch_irradiance(first, second, "South", cache_root=cache_root, today=date(2026, 6, 20))
+    assert calls, "an incomplete snapshot must still consult the API"
 
 
 def test_fetch_irradiance_failure_without_cache_reports_failed_days(monkeypatch, cache_root):
