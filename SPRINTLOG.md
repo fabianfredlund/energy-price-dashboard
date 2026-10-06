@@ -1117,3 +1117,169 @@ made-up customer.
   expander now flags it in the UI with a warning sign.
 - The consumption profile is still a plausible shape, not measured data —
   now disclosed in both the expander and the footer.
+
+## Sprint 8 — Adapt "Tomorrow", test and ship (2026-10-05)
+
+**Written retrospectively on 2026-10-06, reconstructed from the nine commits
+`cf46b49..700ce78`.** That is itself the sprint's main process finding — see
+*Problems hit*.
+
+### Goal
+Battery plan in plain language, polish, user test with 2–3 people acting as
+advisors, fixes, README, deploy. Done when: the public link works in a clean
+browser.
+
+### Built
+- `src/prices.py`: settled past days served from the committed cache with
+  **zero HTTP requests** (measured 8.42 s / 365 requests → 1.73 s / 0,
+  output identical within 1e-12), with a row-count integrity guard computed
+  from the zone so the 23- and 25-hour DST days are not rejected.
+- `src/battery.py`: `grid_charge_plan` returning a per-day reason code, with
+  `grid_charge_allowance` kept as a wrapper so `simulate` and ten existing
+  tests were untouched. `ScenarioResult.yearly_cost_sek` → `cost_sek`.
+- `src/plan.py` + 28 tests: one simulated day reduced to ordered,
+  plain-language steps, with per-action thresholds, positional run merging
+  that survives both DST nights, and a money-reconciliation test.
+- The Tomorrow tab: the plan, two money cards with a "one day is not a year"
+  guard rail, and a tomorrow-only price-spread line.
+- `window_cost` deleted after measurement (see *Decisions*).
+- Polish: `.streamlit/config.toml` pinning a light theme, the requirements
+  split, zero-value donut slices filtered, `page_icon` and About, labelled
+  fallback notices, a "Check again" button.
+- README rewritten for v2, `scripts/warm_cache.py`, `docs/user-test.md`.
+
+### Reused from v1 / adapted / new
+- **Reused:** `calc.cheapest_window`, `cache.py`, `_build_price_figure`,
+  the `(df, failed, fallback)` result shape, the test style.
+- **Adapted:** the committed cache, promoted from outage fallback to primary
+  fast path for settled days.
+- **New:** `plan.py`, the reason codes, the config/requirements split,
+  `warm_cache.py`, the user-test script.
+
+### Decisions (and why)
+1. **A day must not be simulated alone.** `simulate` starts the battery
+   empty, so a day-alone run assumes an empty battery at midnight — wrong on
+   **151 of 367 days**, overstating that day's cost by a mean of 2.53 SEK and
+   up to 13.21 SEK against a figure displayed as 8–21 SEK. Fixed by
+   simulating the 48-hour window already fetched and slicing. One warm-up day
+   reproduces a continuous year **exactly**.
+2. **`window_cost` deleted, on a measurement rather than tidiness.** It
+   prices a window at constant power, which is what rule 4 *plans* but not
+   what `simulate` *realises*; the two differ in 8 hours of the year by up to
+   4.98 kWh. A SEK figure from it would have contradicted the next tab.
+3. **Hour ranges render "17:00–21:00 · 4 h"**, deviating from CLAUDE.md's
+   illustrative "17–20": Swedish price apps label an hour by its start, so
+   "17–20" is ambiguous on the one line a customer screenshots, and the hour
+   count is also the DST disambiguator.
+4. **No `ttl` on the year-long fetchers.** The cache key is the window, so it
+   self-invalidates at midnight; a ttl would re-issue 365 requests every hour
+   of a working session.
+
+### Alternatives considered and rejected (and why)
+- *Disclosing the empty-battery assumption instead of fixing it* — rejected;
+  it would have meant printing a number known to be wrong by more than half
+  on a large minority of days.
+- *Keeping `window_cost` another sprint* — rejected once measured.
+- *A date picker on the Tomorrow tab* — rejected; it would have turned
+  "Tomorrow" into a second history tab.
+
+### Problems hit / how solved
+- **This entry is a day late, and the rule in CLAUDE.md is "after every
+  sprint".** The sprint ended on a `docs:` commit, which reads as finished,
+  so the log step was skipped and `git tag sprint-8` with it. The fix was to
+  reconstruct the entry from the commit log and tag the real last commit
+  (`700ce78`) rather than the log commit, so the tag means what the other
+  seven mean. Worth recording because the process is the deliverable here:
+  a sprint is not over when the code is.
+- A dark-mode visitor would have seen white charts on a dark page —
+  `theme.base` defaults to unset, i.e. follows the visitor's OS, while all
+  four Plotly figures hardcode `plotly_white`. Found by checking the default
+  rather than by looking at the screen.
+- Rendering the charts to PNG (kaleido) caught two flaws invisible in the
+  code: a percentage shown to three decimals beside others at one, and a
+  comma thousands separator against the thin space used everywhere else.
+
+### Open questions for next sprint
+- **The sprint's own done-criterion was not met.** `git remote -v` is still
+  empty: the app was never deployed, so "the public link works in a clean
+  browser" is false. Deployment needs a GitHub repo and a Community Cloud
+  login.
+- **The user test was written but never run.** `docs/user-test.md` is a
+  script with no recorded results.
+- `nätnytta` is still an unsourced placeholder — closed in Define iteration 2
+  by removing it entirely.
+- The committed cache decays by a day per day while Community Cloud's
+  filesystem is ephemeral, so only a commit can heal it.
+
+## Define iteration 2 — problem statement simplified after review (2026-10-06)
+
+Not a sprint. Sprints 0–8 were Build; this is a deliberate return to
+**Define**, which is the part of the design-thinking process this course is
+actually grading.
+
+### Trigger
+A review of the Sprint 7–8 dashboard found it answered **five** questions
+where the advisor needed **four**, and that it showed *data* where the
+advisor needed an *answer*. An advisor cannot read a heatmap aloud to a
+customer. The screen was full of evidence and short of conclusions.
+
+### Decided
+- The dashboard answers exactly four questions: is solar worth it; what is
+  the payback and the yearly saving; should they get a battery; and how big.
+- **Three full years** (Oct 2023 – Sep 2026) instead of twelve months, with
+  today's rules applied to all three, reported as an average plus the range.
+- The window is **fixed, not rolling**, so the numbers are identical across
+  the written report, the screenshots and the pitch video.
+- The assumptions box becomes **editable**, each value carrying its own
+  source and "last updated" date.
+- The green technology deduction is modelled, **off by default**, with a
+  combined cap of 50 000 SEK × number of owners.
+- `buy = spot × 1.25 + surcharge`, `sell = spot`.
+
+### Removed, and why
+| Removed | Why |
+|---|---|
+| Tomorrow tab (and `src/plan.py`) | Answers none of the four questions. Shipped 2026-10-05, removed 2026-10-06 — the clearest evidence this iteration was a genuine narrowing. |
+| Hour × month heatmap | Shows a pattern; the advisor needs a verdict. |
+| Donut (where the power goes) | Interesting, not decision-relevant. |
+| Date-zoom overlay chart | The screen now shows results, not dates. |
+| Four KPI cards | Replaced by two answer cards that state a conclusion in a sentence. |
+| `nätnytta` (grid benefit) | An unsourced placeholder since Sprint 6, closed by **deleting the term**, not by sourcing it. `sell = spot`. |
+
+### Decisions (and why)
+1. **The removals are the point.** Roughly three sprints of UI is being cut
+   because it answered questions nobody asked. Recorded as deliberate
+   narrowing, not scope loss.
+2. **The model gets more honest by shrinking.** Dropping `nätnytta` closes a
+   flagged open question by removing the thing. It is not free: **94% of
+   negative-spot hours sit in the −5..0 öre band**, so they flip from sold to
+   curtailed and curtailment rises sharply. That is a real effect, and it is
+   also the best argument for a battery, so it stays visible in one line.
+3. **The buy-price reformulation changes nothing by itself.**
+   `(spot + tax + grid) × 1.25 ≡ spot × 1.25 + surcharge` — verified to
+   2.8e-17. The numbers move because the **grid fee was corrected** from an
+   implied 33.75 öre to a sourced 23 öre incl. VAT, not because the formula
+   changed. Separated into its own commit so the diff says so.
+4. **Defaults are sourced and not tuned toward a "Yes"**: battery
+   7 000 SEK/kWh, battery warranty 10 years, system price 17 000 SEK/kWp.
+5. **The payback curve retires the battery at year 10 rather than replacing
+   it.** The solar + battery line continues to year 25 accruing solar-only
+   savings, so the permanent gap between the two lines *is* the battery's net
+   lifetime verdict, readable without arithmetic.
+
+### Alternatives considered and rejected (and why)
+- *A rolling three-year window* — rejected: the numbers would drift between
+  the report, the screenshots and the video, which have to agree.
+- *Keeping the Tomorrow tab behind a toggle* — rejected: a toggle is how a
+  simplification quietly fails. It answers none of the four questions.
+- *Replacing the battery at year 10 on the payback curve* — rejected: it
+  requires an unverifiable assumption about the price of a battery in 2036.
+- *Normalising the three years for the 2024 leap day* — rejected on
+  measurement: worth ~2.6 SEK against a between-year spread of thousands.
+
+### Open questions for next sprint
+- At sourced prices the honest answer is **Solar: Yes, Battery: No** — the
+  battery pays back in ~20 years against a 10-year warranty. The card must
+  also say that on an expected 15-year service life it *would* pay off with
+  the deduction, because that is the question an advisor will be asked next.
+- Deployment and the user test are still outstanding from Sprint 8.
