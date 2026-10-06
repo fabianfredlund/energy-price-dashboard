@@ -181,14 +181,24 @@ DEFAULT_KWP = 10
 DEFAULT_SYSTEM_PRICE_SEK_PER_KWP = 17000
 DEFAULT_SYSTEM_PRICE_SEK = DEFAULT_SYSTEM_PRICE_SEK_PER_KWP * DEFAULT_KWP
 
-#: Installed price per kWh before any deduction. Research (Oct 2026) puts home
-#: batteries at 6 000–7 500 SEK/kWh, ~7 000 typical; a 10 kWh battery is
-#: commonly quoted around 70 000 SEK.
+#: The size an advisor is quoted a price against. The UI asks for a flat SEK
+#: figure ("what does a battery cost?"), not a per-kWh rate -- an advisor has
+#: a quote for a specific battery, not an abstract rate card. 10 kWh because
+#: it is a common reference size and sits in the middle of BATTERY_SIZES_KWH.
+BATTERY_PRICE_REFERENCE_KWH = 10
+
+#: Installed price for a BATTERY_PRICE_REFERENCE_KWH battery, before any
+#: deduction. Research (Oct 2026) puts home batteries at 6 000–7 500 SEK/kWh,
+#: ~7 000 typical; a 10 kWh battery is commonly quoted around 70 000 SEK.
+#: Internally this is still divided down to a per-kWh rate (economics.recommend
+#: needs one to price 0/5/10/15 kWh against each other when answering "how
+#: big?") -- but nobody types a rate, they type what their quote says.
 #:
 #: This is the single most load-bearing unverified number in the project: it
 #: decides the battery Yes/No on its own. Break-even for a 10-year payback is
-#: roughly 3 200–3 500 SEK/kWh without the deduction.
-DEFAULT_BATTERY_PRICE_SEK_PER_KWH = 7000
+#: roughly 32 000–35 000 SEK for this reference size, without the deduction.
+DEFAULT_BATTERY_PRICE_SEK = 70000
+DEFAULT_BATTERY_PRICE_SEK_PER_KWH = DEFAULT_BATTERY_PRICE_SEK / BATTERY_PRICE_REFERENCE_KWH
 
 
 # --- The current values ----------------------------------------------------

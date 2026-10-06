@@ -45,6 +45,15 @@ def _input(at, label_fragment: str):
     raise AssertionError(f"no number input matching {label_fragment!r}")
 
 
+# The battery price widget is a flat SEK quote for a 10 kWh reference
+# battery (see config.BATTERY_PRICE_REFERENCE_KWH), not a per-kWh rate --
+# an advisor has a quote, not a rate card. These multiply a target
+# per-kWh rate by 10 so the test's intent (cheap / expensive) stays
+# readable without each call site repeating the reference size.
+CHEAP_BATTERY_SEK = 1000 * 10     # 1 000 SEK/kWh equivalent -- pays back fast
+EXPENSIVE_BATTERY_SEK = 25000 * 10  # 25 000 SEK/kWh equivalent -- never pays back
+
+
 @pytest.fixture(scope="module")
 def baseline():
     return _run()
@@ -139,7 +148,7 @@ def test_a_longer_solar_lifetime_can_turn_a_no_into_a_yes():
 
 def test_a_cheap_battery_is_recommended_with_a_size():
     at = _run()
-    _input(at, "Battery price").set_value(1000)
+    _input(at, "Battery price").set_value(CHEAP_BATTERY_SEK)
     at.run()
     headlines = _headlines(at)
     assert "Battery: **Yes" in headlines
@@ -150,7 +159,7 @@ def test_an_expensive_battery_is_refused_but_still_names_the_best_candidate():
     """A bare "No" is useless to an advisor -- they need to know how far off
     it is before deciding whether to revisit it."""
     at = _run()
-    _input(at, "Battery price").set_value(25000)
+    _input(at, "Battery price").set_value(EXPENSIVE_BATTERY_SEK)
     at.run()
     headlines = _headlines(at)
     assert "Battery: **No**" in headlines
@@ -162,12 +171,12 @@ def test_the_service_life_sentence_appears_only_when_the_horizons_disagree():
     at = _run()
 
     # Far too expensive to pay back on either horizon -> no qualifier
-    _input(at, "Battery price").set_value(25000)
+    _input(at, "Battery price").set_value(EXPENSIVE_BATTERY_SEK)
     at.run()
     assert "**But:**" not in _headlines(at)
 
     # Comfortably inside the warranty -> nothing to qualify
-    _input(at, "Battery price").set_value(1000)
+    _input(at, "Battery price").set_value(CHEAP_BATTERY_SEK)
     at.run()
     assert "**But:**" not in _headlines(at)
 

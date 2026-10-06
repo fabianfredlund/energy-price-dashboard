@@ -20,9 +20,10 @@ from plotly.subplots import make_subplots
 from src.battery import build_frame, run_scenario
 from src.config import (
     ASSUMPTIONS,
+    BATTERY_PRICE_REFERENCE_KWH,
     BATTERY_SIZES_KWH,
     DEFAULT_ANNUAL_CONSUMPTION_KWH,
-    DEFAULT_BATTERY_PRICE_SEK_PER_KWH,
+    DEFAULT_BATTERY_PRICE_SEK,
     DEFAULT_KWP,
     DEFAULT_ORIENTATION,
     DEFAULT_SYSTEM_PRICE_SEK,
@@ -556,11 +557,20 @@ with st.container(border=True):
         value=DEFAULT_SYSTEM_PRICE_SEK, step=5000,
         help="Installed, before any deduction.",
     ))
-    battery_price_per_kwh = float(c5.number_input(
-        "Battery price (SEK/kWh)", min_value=0, max_value=30000,
-        value=DEFAULT_BATTERY_PRICE_SEK_PER_KWH, step=250,
-        help="Installed, before any deduction.",
+    battery_price_quoted = float(c5.number_input(
+        f"Battery price (SEK, for {BATTERY_PRICE_REFERENCE_KWH} kWh)",
+        min_value=0, max_value=300000,
+        value=DEFAULT_BATTERY_PRICE_SEK, step=5000,
+        help=(
+            f"Installed price for a {BATTERY_PRICE_REFERENCE_KWH} kWh battery, "
+            f"before any deduction — what a quote actually says. Other sizes "
+            f"(5, 15 kWh) are priced in proportion, since the app has to compare "
+            f"sizes to answer 'how big?'."
+        ),
     ))
+    # The sweep that answers "how big?" needs a rate to price 0/5/10/15 kWh
+    # against each other; the advisor only ever types a quote, never a rate.
+    battery_price_per_kwh = battery_price_quoted / BATTERY_PRICE_REFERENCE_KWH
 
 settings = _render_assumptions()
 
