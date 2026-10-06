@@ -1283,3 +1283,125 @@ customer. The screen was full of evidence and short of conclusions.
   also say that on an expected 15-year service life it *would* pay off with
   the deduction, because that is the question an advisor will be asked next.
 - Deployment and the user test are still outstanding from Sprint 8.
+
+## Sprint 9 — The four answers (2026-10-06)
+
+### Goal
+Build what Define iteration 2 specified: five inputs, an editable
+assumptions box, two answer cards and three charts, over a fixed
+three-year window. Done when an advisor can answer the four questions for
+a made-up customer, and every editable assumption demonstrably moves the
+result.
+
+### Built
+- `src/config.py` rewritten as an `Assumption(value, unit, label, updated,
+  source, verified)` table — the number and its provenance in one tuple.
+  Six values newly sourced and cited; eight flagged unverified.
+- `src/battery.py`: the new price model, and every assumption threaded as
+  a **required keyword-only argument**. The module now imports nothing
+  from `config`.
+- `src/economics.py` (new): three-year aggregation, the deduction with its
+  combined cap, payback, the two verdicts, and the payback curve.
+- `src/solar.py`: the settled-day cache fast path that `prices.py` got in
+  Sprint 8.
+- `app.py` rewritten: one page, no tabs.
+- `scripts/warm_cache.py` rewritten for the fixed window, with `--verify`.
+- The full Oct 2023 – Sep 2026 window fetched and committed: 26 304 rows
+  per series, 3 309 files, 3.0 MB of content.
+- `tests/test_app.py` (new, 14) and `tests/test_economics.py` (new, 30).
+  **202 passing, none touching the network.**
+
+### Reused from v1 / adapted / new
+- **Reused unchanged:** `prices.py` (the Sprint 8 fast path now pays off
+  completely — the window is wholly settled, so a run makes zero requests),
+  `cache.py`, `consumption.py`, `calc.cheapest_window`, the four hourly
+  battery rules and the energy-balance invariant.
+- **Adapted:** `battery.py`'s price functions and signatures; `solar.py`
+  gained the same fast path; `config.py` became a provenance table.
+- **New:** `economics.py`, the whole of `app.py`, `test_app.py`.
+- **Removed:** `transform.py`, `plan.py`, `fetch_irradiance_forecast`,
+  `compare_scenarios`, and 53 tests with them.
+
+### Decisions (and why)
+1. **The result is "Solar: Yes, Battery: No", and it ships that way.**
+   19 years for solar (saving 9 176 SEK/yr, range 7 639–11 338); no
+   battery size pays back inside its 10-year warranty, best case 5 kWh at
+   24 years. Defaults were sourced and deliberately **not tuned toward a
+   "Yes"** — break-even is ~3 200–3 500 SEK/kWh against a market price of
+   ~7 000.
+2. **The battery card carries the warranty-vs-service-life sentence**, not
+   just the expander. With the deduction on, the best size lands at 12
+   years: past the 10-year warranty, inside a 15-year service life. An
+   advisor asked "why no battery?" needs to be able to say that out loud,
+   and a sentence buried in an expander never gets said. Two tests assert
+   it is **absent** when the horizons agree, so it cannot become
+   boilerplate.
+3. **Assumptions are required keyword-only arguments, and two tests
+   enforce it.** The characteristic failure of an editable box is a
+   function that reads a constant behind the user's back. Here it would
+   have failed *partly* — the surcharge re-enters the battery's
+   grid-charging rule — and a half-wrong screen is worse than an obviously
+   broken one.
+4. **The cheap/expensive split is designed, measured and tested.** Editing
+   a price, the deduction or a lifetime reruns in **0.15 s**; editing the
+   surcharge takes **2.79 s** because it genuinely re-simulates three
+   years. `YearlyCosts` is a handful of floats so it can be cached freely;
+   the detail frames never are.
+5. **`solar.py` got the settled-day fast path too.** Measured: **0 HTTP
+   requests** for the full three years. It costs ~4 s of file reads, which
+   is a worse cold start than one API call — accepted, because it makes a
+   Community Cloud cold start independent of Open-Meteo, lets the app work
+   on bad wifi in a customer meeting, and keeps the test suite off the
+   network.
+6. **The deduction cap is apportioned solar-first.** The spec says
+   "combined" and gives no split; the cap binds at the default customer.
+   Solar-first keeps the solar card stable while the battery sweep runs —
+   otherwise it would jump about for reasons the advisor cannot explain.
+7. **`tests/test_app.py` is committed this time.** Sprints 7 and 8 drove
+   the app with `AppTest` interactively and never committed it, which is
+   exactly why deleting an entire tab had no safety net.
+
+### Alternatives considered and rejected (and why)
+- *Stopping the battery line at year 10 on the payback curve* — rejected
+  in favour of Fabian's design: the line continues to 25 accruing
+  solar-only savings, so the permanent gap between the two lines **is**
+  the battery's net lifetime verdict, readable without arithmetic.
+- *Normalising the three years for the 2024 leap day* — rejected on
+  measurement: ~0.01% of the headline against a year-to-year spread of
+  thousands. `year_spans` raises on a non-whole window instead.
+- *Colouring the average-day price bars with the Cheap/Normal/Expensive
+  palette* — rejected twice over: the validator hard-fails it against the
+  production yellow, **and it would be false**, because averaging 24 hours
+  destroys spikes and would label a 76 öre hour a "spike" when the true
+  hourly 90th percentile is far higher.
+- *A grey band for the three-year range* — rejected: it fails the
+  palette's chroma floor. The band is drawn in each series' own hue.
+
+### Problems hit / how solved
+- **Two existing tests inverted, and that was the point.** With
+  `sell = spot`, a mildly negative hour is curtailed where it used to be
+  sold. ~94% of real negative-spot hours sit in that band, so this is the
+  opposite of a corner case. Both tests were renamed rather than quietly
+  edited, so the diff says what changed.
+- **Attributing the movement in the numbers.** The buy-price reformulation
+  and the grid-fee correction landed together and could have been confused
+  for each other. Separated by measurement: the reformulation is exactly
+  neutral (pinned by a test to 1e-12), and the **fee correction alone**
+  moves the solar saving 12 011 → 11 403 SEK/yr.
+- **A thousands-separator bug caught by rendering the page, not by a
+  test.** "11 238 kWh, of which…" lost its comma, because the grouping
+  substitution was applied to the whole sentence instead of the number.
+- **Keeping every commit green while deleting half the app.** `app.py` was
+  knowingly broken for two commits; the test suite was the guard, and the
+  commit messages say so rather than pretending otherwise.
+
+### Open questions for next sprint
+- **Still outstanding from Sprint 8: deployment and the user test.** There
+  is no git remote, so the app has never been public, and
+  `docs/user-test.md` has never been run. Both need Fabian.
+- The **battery price (7 000 SEK/kWh)** is the most load-bearing number in
+  the project — it decides half the output on its own. It is a market
+  average, not Kustsol's quote.
+- An optional, measured improvement is designed but not built: replacing
+  the 3 309 day-files with three concatenated CSVs would cut the cold read
+  from ~4 s to ~0.13 s, which only the deployed app pays.
